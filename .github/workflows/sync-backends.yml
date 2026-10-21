@@ -1,0 +1,47 @@
+name: Sync backends (Supabase ↔ GAS)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'        # every 6 hours
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (print the plan, write nothing)'
+        type: boolean
+        default: true
+      force:
+        description: 'Allow large delete batches (normally refused)'
+        type: boolean
+        default: false
+
+# Never run two syncs at once.
+concurrency:
+  group: sync-backends
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Unit tests
+        run: node --test tests/sync.test.js
+
+      - name: Sync
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GAS_URL:              ${{ secrets.GAS_URL }}
+          GAS_SYNC_KEY:         ${{ secrets.GAS_SYNC_KEY }}
+          # Scheduled runs are live; manual runs default to dry-run.
+          DRY_RUN:              ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.force }}" = "true" ]; then ARGS="--force"; fi
+          node scripts/sync.js $ARGS

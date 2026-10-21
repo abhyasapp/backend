@@ -1,0 +1,25 @@
+# Secrets
+.env
+.env.local
+supabase/functions/api/.env
+
+# Clasp (GAS project link)
+gas/.clasp.json
+gas/node_modules/
+
+# Deno
+deno.lock
+
+# Node
+node_modules/
+package-lock.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
