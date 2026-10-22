@@ -417,20 +417,29 @@ function createSupabase({ url, key, fetchImpl = fetch, pageSize = 1000 }) {
 }
 
 function createGas({ url, key, fetchImpl = fetch }) {
+  // The action name is not a secret, so it also goes in the URL. If Apps Script ever
+  // drops the POST body (seen as "Unknown action: ''"), the request is still routed
+  // correctly and fails as "auth failed" instead — and every failure is retried.
+  const withAction = (action) => url + (url.includes('?') ? '&' : '?') + 'action=' + encodeURIComponent(action);
+
   async function post(body) {
     return withRetry(`GAS ${body.action}`, async () => {
-      const resp = await fetchImpl(url, {
+      const resp = await fetchImpl(withAction(body.action), {
         method: 'POST', redirect: 'follow',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },     // avoids a CORS preflight; GAS parses the body itself
-        body: JSON.stringify({ ...body, key }),
+        body: JSON.stringify({ ...body, key }),                       // the secret key stays in the body, never in the URL
       });
       const text = await resp.text();
       let data;
       try { data = JSON.parse(text); }
-      catch { const e = new Error(`non-JSON response (HTTP ${resp.status}): ${text.slice(0, 120)}`); throw e; }
-      if (!data.success) { const e = new Error(data.error || 'unknown error'); e.noRetry = /auth|must use|unknown/i.test(String(data.error)); throw e; }
+      catch { throw new Error(`non-JSON response (HTTP ${resp.status}): ${text.slice(0, 120)}`); }
+      if (!data.success) {
+        const e = new Error(data.error || 'unknown error');
+        e.noRetry = /must (use|be sent as) (a )?post/i.test(String(data.error));   // everything else may be transient
+        throw e;
+      }
       return data;
-    });
+    }, 4);
   }
   return {
     pull: (table) => post({ action: 'syncpull', tables: table }),
