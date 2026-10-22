@@ -153,3 +153,21 @@ test('run(): failures are reported (exit-code material) and dry-run writes nothi
   const live = await S.run({ supa, gas, dryRun: false });
   assert.ok(writes.some((w) => w[0] === 'gas' && w[1] === 'users'));
 });
+
+test('GAS client: action is also in the URL, the key only in the body, and a dropped body is retried', async () => {
+  const seen = [];
+  let n = 0;
+  const fetchImpl = async (url, opts) => {
+    seen.push({ url, body: JSON.parse(opts.body) });
+    n++;
+    const reply = n === 1 ? { success: false, error: "Unknown action: ''." } : { success: true, tables: { progress: [] } };
+    return { status: 200, text: async () => JSON.stringify(reply) };
+  };
+  const gas = S.createGas({ url: 'https://script.google.com/macros/s/ID/exec', key: 'SECRET', fetchImpl });
+  const res = await gas.pull('progress');
+  assert.equal(res.success, true);
+  assert.equal(seen.length, 2);                                   // retried once after the transient failure
+  assert.ok(seen[0].url.endsWith('/exec?action=syncpull'));
+  assert.ok(!seen[0].url.includes('SECRET'));                     // key never in the URL
+  assert.equal(seen[0].body.key, 'SECRET');
+});
