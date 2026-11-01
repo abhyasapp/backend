@@ -39,3 +39,64 @@ ctx.p={key:'secret',tables:{admins:[{username:'admin',passHash:'h',role:'owner',
 assert.equal(mustChange['admin'],true);
 ctx.p={key:'secret',tables:'admins'}; pull=run('syncPull(p)'); assert.equal(pull.tables.admins[0].must_change_password,'true');
 console.log('GAS sync harness: all assertions passed');
+/* ── correction sync contract (sync/apply_corrections.py) ───────────── */
+(function () {
+  var H = ['id','uid','fileId','questionSnapshot','reason','note','reportedBy','reportedAt','status','optionsSnapshot','correctIndex','chosenIndex','section','appVersion','resolvedAt','resolvedBy','corrected','correctedSnapshot'];
+  function row(o) {
+    return [o.id,o.uid,o.fileId,o.q,'typo','n','stu','2026-10-01T00:00:00Z','resolved',
+      JSON.stringify(o.options),0,1,'practice','2.06',o.resolvedAt,'admin','TRUE',JSON.stringify(o.snapshot)];
+  }
+  var rows = [H,
+    row({ id:'R1', uid:'FA_50', fileId:'FA', q:'trim A', options:['30','60'], resolvedAt:'2026-10-31T09:00:00Z',
+      snapshot:{ uid:'corr_a1', at:'2026-10-31T09:12:44Z',
+        before:{ question:'51. bearing 60 deg', options:['30','60','120','150'] },
+        after:{ question:'51. bearing 63 deg', options:['30','63','120','150'], correctIndex:1, explanation:'x' },
+        q:'legacy', options:['30','63'], correct:1, explanation:'x' } }),
+    row({ id:'R2', uid:'FA_50', fileId:'FA', q:'trim B', options:['a','b'], resolvedAt:'2026-10-31T09:20:00Z',
+      snapshot:{ uid:'corr_a1', at:'2026-10-31T09:12:44Z', before:{ question:'x', options:[] },
+        after:{ question:'dup', options:['a','b'], correctIndex:0 } } }),
+    row({ id:'R3', uid:'FB_7', fileId:'FB', q:'legacy', options:['yes','no'], resolvedAt:'2026-10-31T10:00:00Z',
+      snapshot:{ q:'Legacy after', options:['yes','no'], correct:1, explanation:'' } })
+  ];
+  var cctx = vm.createContext({
+    console: console,
+    QREPORTS_SHEET: 'Q',
+    PropertiesService: { getScriptProperties: function () { return { getProperty: function () { return 'secret'; } }; } },
+    _cachedSheetData_: function () { return { data: rows }; },
+    getQReportsSheet_: function () { return null; },
+    safeEqual_: function (a, b) { return a === b; },
+    Utilities: { getUuid: function () { return 'u'; } },
+    SpreadsheetApp: {}, DriveApp: {}, CacheService: { getScriptCache: function () { return {}; } }
+  });
+  vm.runInContext(fs.readFileSync(require('path').join(__dirname, '..', 'gas', 'report.gs'), 'utf8'), cctx);
+  var call = function (p) { return vm.runInContext('syncCorrectionsSince', cctx)(p); };
+
+  var bad = call({ key: 'bad', since: 0, limit: 500 });
+  assert.equal(bad.success, false);
+  assert.equal(bad.unauthorized, true);
+  assert.ok(/SYNC_KEY/.test(bad.error), 'a bad key must name SYNC_KEY');
+
+  var p1 = call({ key: 'secret', since: 0, limit: 1 });
+  assert.equal(p1.count, 1);
+  assert.equal(p1.truncated, true);
+  assert.equal(p1.total, 2);
+  assert.equal(p1.now, new Date(p1.corrections[0].correctedAt).getTime(),
+    'watermark must be the newest correctedAt actually sent');
+
+  var p2 = call({ key: 'secret', since: p1.now, limit: 500 });
+  var uids = p2.corrections.map(function (c) { return c.uid; });
+  assert.ok(uids.indexOf('corr_a1') !== -1 && uids.indexOf('R3') !== -1,
+    'the row past the limit must not be lost');
+
+  var c = p2.corrections.filter(function (x) { return x.uid === 'corr_a1'; })[0];
+  assert.equal(c.before.question, '51. bearing 60 deg');
+  assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(c.correctedAt), 'correctedAt must be ISO-8601');
+  assert.equal(c.after.correctIndex, 1);
+  assert.equal(c.before.options.length, 4);
+
+  var legacy = p2.corrections.filter(function (x) { return x.uid === 'R3'; })[0];
+  assert.equal(legacy.after.correctIndex, 1);
+  assert.equal(legacy.after.question, 'Legacy after');
+
+  console.log('GAS correction-sync contract: all assertions passed');
+})();
