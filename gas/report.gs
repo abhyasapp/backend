@@ -531,6 +531,19 @@ function adminUpdateQuestion(p) {
       };
     }
 
+    /* The pipeline matches on this snapshot, so it must be the file's
+       current text and options verbatim - including a printed "51." and
+       every option at full length. The report's own snapshot is trimmed
+       for display and cannot be used. */
+    const beforeEdit = {
+      question: String(view.q),
+      options: (view.options || []).map(String),
+      correctIndex: (typeof view.correct === "number" && isFinite(view.correct))
+        ? view.correct : null
+    };
+    const editUid = "corr_" + Utilities.getUuid();
+    const editAt = new Date().toISOString();
+
     /* A copy of the file is kept before every edit. */
     try {
       file.makeCopy("before-edit_" + Date.now() + "_" + file.getName(),
@@ -567,7 +580,16 @@ function adminUpdateQuestion(p) {
     try {
       const reportsSheet = getQReportsSheet_();
       const reportData = reportsSheet.getDataRange().getValues();
+      /* One object, two shapes: uid/at/before/after is what
+         syncCorrectionsSince reads; q/options/correct/explanation keeps every
+         existing console view and export working. */
       const correctedJson = JSON.stringify({
+        uid: editUid, at: editAt,
+        before: beforeEdit,
+        after: {
+          question: newQ, options: options,
+          correctIndex: correct, explanation: explanation
+        },
         q: newQ, options: options, correct: correct, explanation: explanation
       });
       const hits = [];
@@ -729,28 +751,59 @@ function syncCorrectionsSince(p) {
     .getScriptProperties()
     .getProperty("SYNC_KEY");
   if (!expected) {
-    return { success: false, error: "Sync endpoint not configured. Run setSyncKey()." };
+    return {
+      success: false, code: "not_configured",
+      error: "Sync endpoint not configured. Run generateSyncKey() in the Apps Script editor."
+    };
   }
   if (!key || !safeEqual_(key, expected)) {
-    return { success: false, error: "Auth failed." };
+    return {
+      success: false, code: "unauthorized", unauthorized: true,
+      error: "ABHYAS_SYNC_KEY does not match SYNC_KEY in the Apps Script project."
+    };
   }
 
-  const since = Number(p.since) || 0;
-  const limit = Math.min(500, Number(p.limit) || 200);
+  const since = Math.max(0, Number(p.since) || 0);
+  const limit = Math.max(1, Math.min(500, Number(p.limit) || 500));
 
   const data = _cachedSheetData_(QREPORTS_SHEET, getQReportsSheet_).data;
-  const byUid = {};
+  const byKey = {};
 
   for (let i = 1; i < data.length; i++) {
     const r = rowToQReport_(data[i]);
     if (r.status !== "resolved" || !r.corrected) continue;
-    if (!r.correctedSnapshot) continue;
-    const at = new Date(r.resolvedAt).getTime();
-    if (!isFinite(at) || at <= since) continue;
+
+    const snap = r.correctedSnapshot || null;
+    if (!snap) continue;
+
+    /* Current shape: {uid, at, before, after}. Legacy rows stored only the
+       after side at the top level; accept both. */
+    const after = (snap.after && typeof snap.after === "object")
+      ? snap.after
+      : (snap.q != null
+          ? { question: snap.q, options: snap.options,
+              correctIndex: snap.correct, explanation: snap.explanation }
+          : null);
+    if (!after || !String(after.question || "").trim()) continue;
+
+    /* `since` means "at or after": the watermark is the newest correctedAt
+       we sent, so equality must not skip rows sharing that millisecond. */
+    const atMs = new Date(snap.at || r.resolvedAt).getTime();
+    if (!isFinite(atMs) || atMs < since) continue;
+
+    const before = (snap.before && typeof snap.before === "object")
+      ? snap.before
+      : { question: r.questionSnapshot || "", options: r.options || [],
+          correctIndex: r.correctIndex };
 
     const m = String(r.uid || "").match(/^(.+)_(\d+)$/);
+    const ac = after.correctIndex;
     const entry = {
-      uid: r.uid,
+      /* Per-edit id: half of the (uid, corrected_at) idempotency key, so a
+         second edit or a Restore is not mistaken for already_applied. */
+      uid: String(snap.uid || r.id || r.uid),
+      /* ISO-8601 string: a timestamptz column rejects epoch-ms integers. */
+      correctedAt: new Date(atMs).toISOString(),
       fileId: r.fileId,
       questionIndex: m ? Number(m[2]) : null,
       questionNumber: r.questionNumber,
@@ -759,34 +812,40 @@ function syncCorrectionsSince(p) {
       reportedBy: r.reportedBy,
       reportedAt: r.reportedAt,
       correctedBy: r.resolvedBy,
-      correctedAt: r.resolvedAt,
       before: {
-        question: r.questionSnapshot || "",
-        options: r.options || [],
-        correctIndex: r.correctIndex
+        question: String(before.question || ""),
+        options: (Array.isArray(before.options) ? before.options : []).map(String)
       },
       after: {
-        question: r.correctedSnapshot.q || "",
-        options: r.correctedSnapshot.options || [],
-        correctIndex: r.correctedSnapshot.correct,
-        explanation: r.correctedSnapshot.explanation || ""
+        question: String(after.question || ""),
+        options: (Array.isArray(after.options) ? after.options : []).map(String),
+        /* Integer 0..len-1, or null. A string "2" or true is unanswered. */
+        correctIndex: (typeof ac === "number" && isFinite(ac) &&
+                       Math.floor(ac) === ac && ac >= 0) ? ac : null,
+        explanation: String(after.explanation || "")
       }
     };
 
-    const prev = byUid[r.uid];
-    if (!prev || new Date(prev.correctedAt) < new Date(entry.correctedAt)) {
-      byUid[r.uid] = entry;
-    }
+    const k = entry.uid + "|" + entry.correctedAt;
+    if (!byKey[k]) byKey[k] = entry;
   }
 
-  const list = Object.keys(byUid).map(k => byUid[k]);
-  list.sort((a, b) => new Date(a.correctedAt) - new Date(b.correctedAt));
+  const list = Object.keys(byKey).map(k => byKey[k]);
+  list.sort((a, b) =>
+    (new Date(a.correctedAt).getTime() - new Date(b.correctedAt).getTime()) ||
+    String(a.uid).localeCompare(String(b.uid)));
   const out = list.slice(0, limit);
+  const last = out.length ? out[out.length - 1] : null;
 
+  /* The watermark trap: never move past rows cut off by `limit`. Return the
+     newest correctedAt actually sent (wall clock only when nothing matched).
+     The boundary row is re-sent and skipped downstream as already_applied. */
   return {
     success: true,
-    now: Date.now(),
+    now: last ? new Date(last.correctedAt).getTime() : Date.now(),
     count: out.length,
+    total: list.length,
+    truncated: list.length > out.length,
     corrections: out
   };
 }

@@ -258,6 +258,15 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
     const currentQ = arr[index].q || arr[index].question || '';
     if (String(currentQ).trim() !== expectedQ) return json({ success: false, error: 'File changed since you opened it. Please reload.' });
 
+    // Verbatim before-side for the correction pipeline (source number and
+    // full option text included). The report snapshot is trimmed for display.
+    const curCorrect = arr[index].correct ?? arr[index].answer ?? null;
+    const beforeEdit = {
+      question: String(currentQ),
+      options: (Array.isArray(arr[index].options) ? arr[index].options : (arr[index].opts || [])).map(String),
+      correctIndex: Number.isInteger(curCorrect) ? curCorrect : null,
+    };
+
     arr[index].q = fields.q; arr[index].options = fields.options; arr[index].correct = fields.correct; arr[index].explanation = fields.explanation;
     const newContent = JSON.stringify(raw);
     const { error: upErr } = await supabase.storage.from('subjective-content').upload(fileId, newContent, { upsert: true, contentType: 'application/json' });
@@ -268,18 +277,136 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
       await supabase.from('settings').upsert({ key: 'contentVersion', value: String(Date.now()) });
     } catch (e) { console.warn('[adminupdatequestion] signal write failed (file already saved):', e); }
 
-    const reportId = String(params.reportId || '').trim();
-    if (reportId) {
-      try {
-        await supabase.from('question_reports').update({
-          corrected_snapshot: JSON.stringify({ q: fields.q, options: fields.options, correct: fields.correct, explanation: fields.explanation || '' }),
-          correct_index: fields.correct,
-        }).eq('id', reportId);
-      } catch (e) { console.warn('[adminupdatequestion] could not populate corrected_snapshot (non-fatal):', e); }
-    }
+    // Per-edit identity: (uid, corrected_at) is the pipeline's idempotency
+    // key, so a re-edit or a Restore needs a NEW uid/at or it is skipped as
+    // already_applied. Stamp every report for this question (open and
+    // resolved) so restores keep propagating.
+    const editUid = 'corr_' + randId();
+    const editAt = new Date().toISOString();
+    const snapshot = {
+      uid: editUid, at: editAt, before: beforeEdit,
+      after: {
+        question: fields.q, options: fields.options,
+        correctIndex: fields.correct, explanation: fields.explanation || '',
+      },
+      // Legacy top-level keys kept for existing console/export readers.
+      q: fields.q, options: fields.options, correct: fields.correct,
+      explanation: fields.explanation || '',
+    };
+    try {
+      await supabase.from('question_reports')
+        .update({ corrected_snapshot: JSON.stringify(snapshot), correct_index: fields.correct })
+        .eq('file_id', fileId).eq('uid', `${fileId}_${index}`);
+      const reportId = String(params.reportId || '').trim();
+      if (reportId) {
+        await supabase.from('question_reports')
+          .update({ corrected_snapshot: JSON.stringify(snapshot), correct_index: fields.correct })
+          .eq('id', reportId);
+      }
+    } catch (e) { console.warn('[adminupdatequestion] could not populate corrected_snapshot (non-fatal):', e); }
 
     return json({ success: true });
   } catch (e) { return json({ success: false, error: 'Could not save: ' + String(e) }); }
+}
+
+
+// ── Pipeline sync (sync/apply_corrections.py) ────────────────────────
+// POST text/plain JSON: {action:"syncCorrectionsSince", key, since, limit}
+// The admin console routes every admin action here (abhyasEndpointFor), so
+// this store - not only the Apps Script sheet - has to answer the pipeline.
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+export async function synccorrectionssince(params: Record<string, unknown>) {
+  const expected = Deno.env.get('SYNC_KEY') || Deno.env.get('ABHYAS_SYNC_KEY') || '';
+  if (!expected) {
+    return json({ success: false, code: 'not_configured', error: 'SYNC_KEY is not set on the api function.' }, 503);
+  }
+  const key = String(params.key || '');
+  if (!key || !constantTimeEqual(key, expected)) {
+    // 401, not success:false — the pipeline turns that into a named auth
+    // failure instead of reporting a data problem.
+    return json({
+      success: false, code: 'unauthorized',
+      error: 'ABHYAS_SYNC_KEY does not match SYNC_KEY in the api function environment.',
+    }, 401);
+  }
+
+  const since = Math.max(0, Number(params.since) || 0);
+  const limit = Math.max(1, Math.min(500, Number(params.limit) || 500));
+
+  const { data, error } = await supabase.from('question_reports')
+    .select('*').eq('status', 'resolved').eq('corrected', 'true');
+  if (error) return json({ success: false, error: dbMsg(error) }, 500);
+
+  const asInt = (v: unknown): number | null => Number.isInteger(v) && (v as number) >= 0 ? v as number : null;
+  const byKey = new Map<string, any>();
+
+  for (const r of (data || [])) {
+    const snap = safeJsonParse<Record<string, any> | null>(r.corrected_snapshot, null);
+    if (!snap) continue;
+
+    const after = (snap.after && typeof snap.after === 'object')
+      ? snap.after
+      : (snap.q != null
+          ? { question: snap.q, options: snap.options, correctIndex: snap.correct, explanation: snap.explanation }
+          : null);
+    if (!after || !String(after.question || '').trim()) continue;
+
+    const atMs = new Date(String(snap.at || r.resolved_at || '')).getTime();
+    if (!isFinite(atMs) || atMs < since) continue;
+
+    const before = (snap.before && typeof snap.before === 'object')
+      ? snap.before
+      : { question: r.question_snapshot || '', options: safeJsonParse<unknown[]>(r.options_snapshot, []), correctIndex: null };
+
+    const numMatch = String(r.uid || '').match(/^(.+)_(\d+)$/);
+    const entry = {
+      uid: String(snap.uid || r.id),
+      correctedAt: new Date(atMs).toISOString(),
+      fileId: r.file_id,
+      questionIndex: numMatch ? Number(numMatch[2]) : null,
+      reason: r.reason,
+      note: r.note || '',
+      reportedBy: r.reported_by,
+      reportedAt: r.reported_at,
+      correctedBy: r.resolved_by,
+      before: {
+        question: String(before.question || ''),
+        options: (Array.isArray(before.options) ? before.options : []).map(String),
+      },
+      after: {
+        question: String(after.question || ''),
+        options: (Array.isArray(after.options) ? after.options : []).map(String),
+        correctIndex: asInt(after.correctIndex ?? after.correct),
+        explanation: String(after.explanation || ''),
+      },
+    };
+
+    const k = entry.uid + '|' + entry.correctedAt;
+    if (!byKey.has(k)) byKey.set(k, entry);
+  }
+
+  const list = [...byKey.values()].sort((a, b) =>
+    (new Date(a.correctedAt).getTime() - new Date(b.correctedAt).getTime()) ||
+    String(a.uid).localeCompare(String(b.uid)));
+  const out = list.slice(0, limit);
+  const last = out.length ? out[out.length - 1] : null;
+
+  // Watermark trap: advance only to the newest row actually sent, never to
+  // wall-clock time while truncating, or rows past `limit` are lost forever.
+  return json({
+    success: true,
+    now: last ? new Date(last.correctedAt).getTime() : Date.now(),
+    count: out.length,
+    total: list.length,
+    truncated: list.length > out.length,
+    corrections: out,
+  });
 }
 
 export async function adminlistcorrections(params: Record<string, unknown>) {
