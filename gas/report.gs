@@ -614,12 +614,97 @@ function adminUpdateQuestion(p) {
       console.error("adminUpdateQuestion: could not store correctedSnapshot:", e);
     }
 
+    /* The file edit has to happen here (Drive), but the admin console and the
+       correction pipeline read Supabase. Mirror the same per-edit snapshot
+       before returning so the fix is visible immediately instead of waiting
+       for the nightly sheet sync. */
+    try {
+      mirrorCorrectionToSupabase_(
+        fileId, index, beforeEdit,
+        { question: newQ, options: options, correctIndex: correct, explanation: explanation },
+        editUid, editAt, actor, String(p.reportId || ""),
+        String(p.reportReason || ""), String(p.adminNote || "")
+      );
+    } catch (e) {
+      console.error("adminUpdateQuestion: Supabase mirror failed:", e);
+    }
+
     setSettingValue_("contentVersion", String(Date.now()));
     markFileCorrected_(fileId);
     logAction_(actor, "Edit Question", fileId + "#" + index,
       "Question text, options, answer or explanation changed (backup kept)");
     return { success: true };
   });
+}
+
+/* ── Immediate Supabase mirror ──────────────────────────────────────
+   The Drive file is the source of truth for the question, but reports and
+   corrections are read from Supabase. A sheet-only write leaves the console
+   and the pipeline on the old row until the nightly sync, which is why
+   "Fix the question" looked saved but stayed stale. This runs before the
+   response returns.
+
+   Existing rows are updated in place. A legacy report that only ever lived in
+   the sheet gets a resolved row with the report id, so the console's follow-up
+   status call and the pipeline can both find it. */
+function mirrorCorrectionToSupabase_(fileId, index, beforeEdit, after, editUid, editAt, actor, reportId, reason, note) {
+  if (typeof bridgeRequest_ !== "function") return false;
+
+  const enc = encodeURIComponent;
+  const uid = fileId + "_" + index;
+  const snapshot = JSON.stringify({
+    uid: editUid, at: editAt,
+    before: beforeEdit,
+    after: {
+      question: after.question, options: after.options,
+      correctIndex: after.correctIndex, explanation: after.explanation
+    },
+    q: after.question, options: after.options, correct: after.correctIndex,
+    explanation: after.explanation
+  });
+  /* Supabase stores the flag lower-case and the pipeline filters on
+     corrected=eq.true; "TRUE" would be silently skipped. */
+  const patch = {
+    corrected_snapshot: snapshot,
+    correct_index: String(after.correctIndex),
+    corrected: "true"
+  };
+
+  const byUid = bridgeRequest_("patch",
+    "/rest/v1/question_reports?uid=eq." + enc(uid) + "&file_id=eq." + enc(fileId), patch);
+  let byId = { ok: false, data: [] };
+  if (reportId) {
+    byId = bridgeRequest_("patch", "/rest/v1/question_reports?id=eq." + enc(reportId), patch);
+  }
+
+  if (byUid.ok && Array.isArray(byUid.data) && byUid.data.length) return true;
+  if (byId.ok && Array.isArray(byId.data) && byId.data.length) return true;
+
+  /* Bridge disabled (no SUPABASE_SERVICE_ROLE_KEY) or no report id: nothing
+     to insert. A normal edit with an existing Supabase row already returned. */
+  if (byUid.disabled || !reportId) return false;
+
+  const ins = bridgeRequest_("post", "/rest/v1/question_reports", {
+    id: reportId,
+    uid: uid,
+    file_id: fileId,
+    question_snapshot: String(beforeEdit.question || ""),
+    options_snapshot: JSON.stringify(beforeEdit.options || []),
+    correct_index: String(after.correctIndex),
+    chosen_index: "",
+    reason: reason || "admin_edit",
+    note: note || "",
+    reported_by: actor,
+    reported_at: editAt,
+    status: "resolved",
+    resolved_at: editAt,
+    resolved_by: actor,
+    corrected: "true",
+    corrected_snapshot: snapshot,
+    section: "",
+    app_version: ""
+  });
+  return !!ins.ok;
 }
 
 /* ── Corrections list + export ─────────────────────────────────────
