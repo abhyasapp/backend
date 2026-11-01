@@ -557,8 +557,21 @@ function adminUpdateQuestion(p) {
     const editUid = "corr_" + Utilities.getUuid();
     const editAt = new Date().toISOString();
 
-    /* Drive keeps the previous content in the file's revision history.
-       Copying the whole file here only adds latency to every save. */
+    /* One explicit full-file copy per day. Drive also keeps every previous
+       version, but a separate copy is easier to find if something goes badly
+       wrong. Making one on every save was the slow part. */
+    try {
+      const props = PropertiesService.getScriptProperties();
+      const backupKey = "backup_day_" + fileId;
+      const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+      if (String(props.getProperty(backupKey) || "") !== today) {
+        file.makeCopy("daily-backup_" + today + "_" + file.getName(),
+          getOrCreateFolder_("QuestionEditBackups"));
+        props.setProperty(backupKey, today);
+      }
+    } catch (e) {
+      return { success: false, error: "Could not make today's backup, so nothing was changed." };
+    }
 
     q[view.keys.text] = newQ;
     q[view.keys.options] = options;
@@ -634,7 +647,7 @@ function adminUpdateQuestion(p) {
     setSettingValue_("contentVersion", String(Date.now()));
     markFileCorrected_(fileId);
     logAction_(actor, "Edit Question", fileId + "#" + index,
-      "Question text, options, answer or explanation changed (Drive revision kept)");
+      "Question text, options, answer or explanation changed (daily backup + Drive revision)");
     return { success: true };
   });
 }
