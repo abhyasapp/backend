@@ -449,6 +449,17 @@ function adminGetQuestion(p) {
   if (!/^[A-Za-z0-9_-]{10,200}$/.test(fileId) || !(index >= 0)) {
     return { success: false, error: "Invalid question reference." };
   }
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "aq_" + fileId + "_" + index;
+  try {
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      const hit = JSON.parse(cached);
+      if (hit && hit.question) {
+        return { success: true, index: index, total: hit.total, question: hit.question, cached: true };
+      }
+    }
+  } catch (e) {}
   const res = readJsonFileById_(fileId);
   if (!res.success) return res;
   const arr = _questionArray_(res.result);
@@ -459,13 +470,15 @@ function adminGetQuestion(p) {
   if (!view.keys.text || !view.keys.options || view.options.length < 2) {
     return { success: false, error: "This question uses a format the editor cannot change. Edit the JSON file in Drive instead." };
   }
-  return {
+  const out = {
     success: true, index: index, total: arr.length,
     question: {
       q: view.q, options: view.options,
       correct: view.correct, explanation: view.explanation
     }
   };
+  try { cache.put(cacheKey, JSON.stringify({ total: out.total, question: out.question }), 120); } catch (e) {}
+  return out;
 }
 
 function adminUpdateQuestion(p) {
@@ -544,13 +557,8 @@ function adminUpdateQuestion(p) {
     const editUid = "corr_" + Utilities.getUuid();
     const editAt = new Date().toISOString();
 
-    /* A copy of the file is kept before every edit. */
-    try {
-      file.makeCopy("before-edit_" + Date.now() + "_" + file.getName(),
-        getOrCreateFolder_("QuestionEditBackups"));
-    } catch (e) {
-      return { success: false, error: "Could not make a backup, so nothing was changed." };
-    }
+    /* Drive keeps the previous content in the file's revision history.
+       Copying the whole file here only adds latency to every save. */
 
     q[view.keys.text] = newQ;
     q[view.keys.options] = options;
@@ -571,6 +579,7 @@ function adminUpdateQuestion(p) {
     catch (e) {
       return { success: false, error: "Could not write the file: " + (e.message || e) };
     }
+    try { CacheService.getScriptCache().remove("aq_" + fileId + "_" + index); } catch (e) {}
 
     /* Store the corrected question on every report for this file+index,
        so the console always has a before/after pair without re-reading
@@ -579,33 +588,26 @@ function adminUpdateQuestion(p) {
        request on the script lock for the length of fifty writes. */
     try {
       const reportsSheet = getQReportsSheet_();
-      const reportData = reportsSheet.getDataRange().getValues();
-      /* One object, two shapes: uid/at/before/after is what
-         syncCorrectionsSince reads; q/options/correct/explanation keeps every
-         existing console view and export working. */
-      const correctedJson = JSON.stringify({
-        uid: editUid, at: editAt,
-        before: beforeEdit,
-        after: {
-          question: newQ, options: options,
-          correctIndex: correct, explanation: explanation
-        },
-        q: newQ, options: options, correct: correct, explanation: explanation
-      });
-      const hits = [];
-      for (let i = 1; i < reportData.length; i++) {
-        const uid = String(reportData[i][1] || "");
-        const m = uid.match(/^(.+)_(\d+)$/);
-        if (m && m[1] === fileId && Number(m[2]) === index) hits.push(i + 1);
-      }
-      if (hits.length) {
-        const lo = hits[0];
-        const hi = hits[hits.length - 1];
-        const col = reportsSheet.getRange(lo, 18, hi - lo + 1, 1);
-        const vals = col.getValues();
-        hits.forEach(rowIdx => { vals[rowIdx - lo][0] = correctedJson; });
-        col.setValues(vals);
-        _invalidateSheet_(QREPORTS_SHEET);
+      const uid = fileId + "_" + index;
+      const lastRow = reportsSheet.getLastRow();
+      if (lastRow > 1) {
+        /* Scan the uid column server-side. Reading every report row here made
+           each save slower as the report sheet grew. */
+        const hits = reportsSheet.getRange(2, 2, lastRow - 1, 1)
+          .createTextFinder(uid)
+          .matchCase(true)
+          .matchEntireCell(true)
+          .findAll();
+        if (hits.length) {
+          const rows = hits.map(function (r) { return r.getRow(); });
+          const lo = Math.min.apply(null, rows);
+          const hi = Math.max.apply(null, rows);
+          const col = reportsSheet.getRange(lo, 18, hi - lo + 1, 1);
+          const vals = col.getValues();
+          rows.forEach(function (rowIdx) { vals[rowIdx - lo][0] = correctedJson; });
+          col.setValues(vals);
+          _invalidateSheet_(QREPORTS_SHEET);
+        }
       }
     } catch (e) {
       /* The correctedSnapshot is a convenience, not the record of truth:
@@ -632,7 +634,7 @@ function adminUpdateQuestion(p) {
     setSettingValue_("contentVersion", String(Date.now()));
     markFileCorrected_(fileId);
     logAction_(actor, "Edit Question", fileId + "#" + index,
-      "Question text, options, answer or explanation changed (backup kept)");
+      "Question text, options, answer or explanation changed (Drive revision kept)");
     return { success: true };
   });
 }
@@ -667,17 +669,21 @@ function mirrorCorrectionToSupabase_(fileId, index, beforeEdit, after, editUid, 
   const patch = {
     corrected_snapshot: snapshot,
     correct_index: String(after.correctIndex),
-    corrected: "true"
+    corrected: "true",
+    /* Repair a legacy row whose file_id was blank so the next by-uid lookup
+       and the corrections list stay linked to the file. */
+    file_id: fileId
   };
 
   const byUid = bridgeRequest_("patch",
     "/rest/v1/question_reports?uid=eq." + enc(uid) + "&file_id=eq." + enc(fileId), patch);
+  if (byUid.ok && Array.isArray(byUid.data) && byUid.data.length) {
+    if (!reportId || byUid.data.some(function (r) { return String(r.id) === reportId; })) return true;
+  }
   let byId = { ok: false, data: [] };
   if (reportId) {
     byId = bridgeRequest_("patch", "/rest/v1/question_reports?id=eq." + enc(reportId), patch);
   }
-
-  if (byUid.ok && Array.isArray(byUid.data) && byUid.data.length) return true;
   if (byId.ok && Array.isArray(byId.data) && byId.data.length) return true;
 
   /* Bridge disabled (no SUPABASE_SERVICE_ROLE_KEY) or no report id: nothing
