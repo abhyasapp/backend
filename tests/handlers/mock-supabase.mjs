@@ -46,6 +46,7 @@ class Q {
 }
 const storage = { from: (b) => ({
   download: async (p) => { const v = DB.storage[b + '/' + p]; return v == null ? { data: null, error: { message: 'nf' } } : { data: { text: async () => v }, error: null }; },
+  upload: async (p, v) => { DB.storage[b + '/' + p] = String(v); return { data: { path: p }, error: null }; },
   list: async (_p, o) => ({ data: Object.keys(DB.storage).filter((k) => k.startsWith(b + '/') && k.includes(o?.search || '')).map((k) => ({ name: k.slice(b.length + 1) })) }),
   createSignedUrl: async (p) => ({ data: { signedUrl: 'http://signed/' + p } }), remove: async () => ({}),
 }) };

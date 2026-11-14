@@ -23,3 +23,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Supabase CLI temp state (project ref/urls, must never be committed)
+supabase/.temp/

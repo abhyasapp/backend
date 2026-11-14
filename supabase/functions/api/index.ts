@@ -3,7 +3,7 @@
 // CORS is applied per-request via withCors() using the ALLOWED_ORIGINS allow-list.
 
 import { ALLOWED_ORIGINS, FUNCTION_VERSION } from './_shared/config.ts';
-import { json } from './_shared/http.ts';
+import { json, SECURITY_HEADERS } from './_shared/http.ts';
 import { supabase } from './_shared/db.ts';
 
 import * as Auth from './handlers/auth.ts';
@@ -85,6 +85,7 @@ const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> =
   // ── Reports & Corrections ──────────────────────────────────────────
   'reportquestion': Reports.reportquestion,
   'getmyreports': Reports.getmyreports,
+  'myquestionreports': Reports.myquestionreports,
   'getcorrections': Reports.getcorrections,
   'gethardquestions': Reports.gethardquestions,
   'adminlistquestionreports': Reports.adminlistquestionreports,
@@ -95,6 +96,7 @@ const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> =
   'getreport': Reports.getreport,
   'admingetquestion': Reports.admingetquestion,
   'adminupdatequestion': Reports.adminupdatequestion,
+  'adminapplycorrections': Reports.adminapplycorrections,
   'adminlistcorrections': Reports.adminlistcorrections,
   'adminexportcorrections': Reports.adminexportcorrections,
   'adminmarkfilecorrected': Reports.adminmarkfilecorrected,
@@ -130,6 +132,7 @@ const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> =
 
   // ── Admin Users ────────────────────────────────────────────────────
   'adminlistusers': Admin.adminlistusers,
+  'admingetstudentoverview': Admin.admingetstudentoverview,
   'adminupdateuser': Admin.adminupdateuser,
   'admingrantaccess': Admin.admingrantaccess,
   'admingrantaccessbatch': Admin.admingrantaccessbatch,
@@ -198,6 +201,7 @@ function withCors(req: Request, res: Response): Response {
     headers.set('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type');
   }
   headers.set('Access-Control-Max-Age', '86400');
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
   return new Response(res.body, { status: res.status, headers });
 }
 

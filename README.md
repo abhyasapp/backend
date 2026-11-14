@@ -26,8 +26,16 @@ owner promotes them. The last owner can never be deleted or demoted.
 
 ## Deploy (order matters)
 
-1. **Database** — review, then run `supabase/migrations/20261021000000_admin_enhancements.sql`
-   (adds `admins.must_change_password` and the `deleted_records` tombstone table).
+1. **Database** — for a fresh install apply all migrations in filename order
+   (the base 18-table schema, the admin enhancements, then the report/correction
+   qid + event log):
+    `supabase/migrations/20250101000000_init_schema.sql` (all tables, TEXT columns,
+   RLS on with no policies), then
+    `supabase/migrations/20261021000000_admin_enhancements.sql`
+   (adds `admins.must_change_password` and the `deleted_records` tombstone table),
+   then `supabase/migrations/20261114000000_report_qid_corrections.sql`
+   (adds `question_reports.qid` and the `correction_events` log).
+   All are idempotent; an existing database only needs the newer ones.
 2. **Edge Function**
    ```bash
    supabase secrets set DEFAULT_OWNER_PASSWORD=abhyas      # or a private value
@@ -51,10 +59,21 @@ owner promotes them. The last owner can never be deleted or demoted.
 ## Tests
 
 ```bash
-npm test          # sync logic, GAS sync harness, owner/admin handler behaviour
+npm run verify    # syntax of every .ts/.gs/.js + schema/sync/GAS/owner-admin tests
 ```
 
-Needs Node ≥ 22.18 (native TypeScript stripping for the handler tests).
+`npm run verify` guarantees:
+- every .ts/.gs/.js source parses (no deploy of a broken file),
+- every table/column the Edge Function TypeScript touches exists in the
+  migrations and cannot drift, tested against a real Postgres engine (pglite),
+- all 20 tables have RLS enabled and zero policies (only the service role reads),
+- every Apps Script sheet header maps onto a real Postgres column through
+  `scripts/sync.js` renames, so the six-hourly sync cannot write unknown columns,
+- a student cannot start or submit the same weekly test twice,
+- the sync client retries the Apps Script dropped-POST-body quirk
+  (`Unknown action: ''`) and never puts the key in a URL.
+
+Computes in seconds, no database or network account needed.
 
 ## Known limits (by design)
 

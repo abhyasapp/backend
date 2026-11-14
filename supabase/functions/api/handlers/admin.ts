@@ -105,6 +105,168 @@ export async function adminlistusers(params: Record<string, unknown>) {
   return json({ success: true, users, totalCount, truncated: totalCount > limit });
 }
 
+/* ── Student 360 ─────────────────────────────────────────────────────
+   One read-only support summary for the student drawer. It joins the data
+   the console already stores (progress, reports, written answers, weekly
+   attempts) without exposing any new write path. */
+function currentStreak(days: unknown): number {
+  if (!Array.isArray(days)) return 0;
+  const set = new Set(days.filter(d => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) as string[]);
+  if (!set.size) return 0;
+  const dayMs = 86400000;
+  const now = Date.now();
+  const today = new Date(now).toISOString().slice(0, 10);
+  const yesterday = new Date(now - dayMs).toISOString().slice(0, 10);
+  if (!set.has(today) && !set.has(yesterday)) return 0;
+  let offset = set.has(today) ? 0 : 1;
+  let skip = 1;
+  let n = 0;
+  while (n <= 400) {
+    const day = new Date(now - offset * dayMs).toISOString().slice(0, 10);
+    if (set.has(day)) { n++; offset++; continue; }
+    if (skip > 0) { skip--; offset++; continue; }
+    break;
+  }
+  return n;
+}
+
+async function readProgress(raw: unknown): Promise<any> {
+  const data = String(raw || '');
+  if (!data) return {};
+  try {
+    if (data.startsWith('gz1:')) {
+      const bytes = Uint8Array.from(atob(data.slice(4)), c => c.charCodeAt(0));
+      const text = await new Response(
+        new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
+      ).text();
+      return JSON.parse(text);
+    }
+    return JSON.parse(data);
+  } catch {
+    return {};
+  }
+}
+
+export async function admingetstudentoverview(params: Record<string, unknown>) {
+  const admin = await authAdmin(params, 'users_view');
+  if (!admin.ok) return json(admin.error);
+  const target = String(params.targetUsername || '').trim();
+  if (!target) return json({ success: false, error: 'Target username required.' });
+
+  const userRows = await supabase.from('users').select('*').eq('username', target).limit(1);
+  const progressRows = await supabase.from('progress').select('*').eq('username', target).limit(1);
+  const reportRows = await supabase.from('question_reports').select('*').eq('reported_by', target).order('reported_at', { ascending: false }).limit(1000);
+  const submissionRows = await supabase.from('subjective_submissions').select('*').eq('username', target).order('submitted_at', { ascending: false }).limit(1000);
+  const weeklyRows = await supabase.from('weekly_attempts').select('*').eq('username', target).order('submitted_at', { ascending: false }).limit(1000);
+
+  const user = userRows.data && userRows.data[0] ? userRows.data[0] as Record<string, unknown> : null;
+  if (!user) return json({ success: false, error: 'Student not found.' });
+
+  const progress = await readProgress(progressRows.data && progressRows.data[0] ? (progressRows.data[0] as any).data : '');
+  const prog = progress && typeof progress.prog === 'object' ? progress.prog : {};
+  const sessions = Array.isArray(prog.sessions) ? prog.sessions.filter((s: any) => s && typeof s === 'object') : [];
+  const reports = reportRows.data || [];
+  const submissions = submissionRows.data || [];
+  const weekly = weeklyRows.data || [];
+
+  let answered = Number(prog.total) || 0;
+  let correct = Number(prog.correct) || 0;
+  if (!answered) {
+    sessions.forEach((s: any) => { answered += Number(s.total) || 0; correct += Number(s.correct) || 0; });
+  }
+  const accuracy = answered ? Math.round((correct / answered) * 100) : null;
+  const minutes = Math.round(sessions.reduce((n: number, s: any) => n + (Number(s.durationSec) || 0), 0) / 60);
+  const mockPapers = sessions.filter((s: any) => String(s.mode || '') === 'exam').length;
+
+  const chapterTally: Record<string, { attempted: number; correct: number }> = {};
+  const chapStats = progress && typeof progress.chapStats === 'object' ? progress.chapStats : null;
+  if (chapStats && !Array.isArray(chapStats)) {
+    Object.keys(chapStats).forEach(name => {
+      const row = chapStats[name];
+      if (!row || typeof row !== 'object') return;
+      chapterTally[name] = { attempted: Number(row.attempted) || 0, correct: Number(row.correct) || 0 };
+    });
+  }
+  if (!Object.keys(chapterTally).length) {
+    sessions.forEach((s: any) => {
+      const name = String(s.chapter || 'Unknown');
+      const row = chapterTally[name] || (chapterTally[name] = { attempted: 0, correct: 0 });
+      row.attempted += Number(s.total) || 0;
+      row.correct += Number(s.correct) || 0;
+    });
+  }
+  const weakChapters = Object.entries(chapterTally)
+    .map(([name, row]) => ({
+      name,
+      accuracy: row.attempted ? Math.round((row.correct / row.attempted) * 100) : 0,
+      attempted: row.attempted,
+    }))
+    .filter(row => row.attempted >= 5 && row.accuracy < 70)
+    .sort((a, b) => a.accuracy - b.accuracy || b.attempted - a.attempted)
+    .slice(0, 5);
+
+  let lastMs = 0;
+  const bump = (v: unknown) => {
+    if (!v) return;
+    const t = new Date(String(v)).getTime();
+    if (isFinite(t) && t > lastMs) lastMs = t;
+  };
+  sessions.forEach((s: any) => bump(s.at));
+  bump(progressRows.data && progressRows.data[0] ? (progressRows.data[0] as any).updated_at : '');
+  reports.forEach((r: any) => bump(r.reported_at));
+  submissions.forEach((s: any) => bump(s.submitted_at));
+  weekly.forEach((w: any) => bump(w.submitted_at));
+
+  const openReports = reports.filter((r: any) => String(r.status || '') === 'open').length;
+  const graded = submissions.filter((s: any) => String(s.status || '') === 'graded').length;
+  const pending = submissions.length - graded;
+
+  const reasons: string[] = [];
+  let level = 'ok';
+  const signal = (text: string, high = false) => {
+    reasons.push(text);
+    if (high) level = 'high';
+    else if (level !== 'high') level = 'watch';
+  };
+  const inactiveDays = lastMs ? Math.floor((Date.now() - lastMs) / 86400000) : null;
+  if (inactiveDays != null && inactiveDays >= 14) signal(`No practice for ${inactiveDays} days`, true);
+  else if (inactiveDays != null && inactiveDays >= 7) signal(`No practice for ${inactiveDays} days`);
+  if (String(user.status || '') === 'expired') signal('Trial expired without payment', true);
+  if (String(user.status || '') === 'payment_pending') signal('Payment is still waiting');
+  if (String(user.status || '') === 'trial' && user.trial_expires_at) {
+    const left = new Date(String(user.trial_expires_at)).getTime() - Date.now();
+    if (left > 0 && left < 3 * 86400000) signal(`Trial ends in ${Math.max(1, Math.ceil(left / 86400000))} day(s)`);
+  }
+  if (answered === 0) signal('Has not answered a question yet', true);
+  if (answered >= 20 && accuracy != null && accuracy < 40) signal('Accuracy is below 40%');
+
+  return json({
+    success: true,
+    study: {
+      lastActiveAt: lastMs ? new Date(lastMs).toISOString() : '',
+      questionsAnswered: answered,
+      accuracy,
+      streakDays: currentStreak(progress && progress.stk ? progress.stk.days : []),
+      minutes,
+      mockPapers,
+      weakChapters,
+    },
+    reports: {
+      open: openReports,
+      total: reports.length,
+      recent: reports.slice(0, 3).map((r: any) => ({
+        id: r.id,
+        status: r.status,
+        reason: r.reason,
+        questionSnapshot: r.question_snapshot,
+        reportedAt: r.reported_at,
+      })),
+    },
+    submissions: { pending, graded, total: submissions.length },
+    risk: { level: reasons.length ? level : 'ok', reasons },
+  });
+}
+
 export async function adminupdateuser(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'users_manage');
   if (!admin.ok) return json(admin.error);

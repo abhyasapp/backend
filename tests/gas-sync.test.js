@@ -41,13 +41,13 @@ ctx.p={key:'secret',tables:'admins'}; pull=run('syncPull(p)'); assert.equal(pull
 console.log('GAS sync harness: all assertions passed');
 /* ── correction sync contract (sync/apply_corrections.py) ───────────── */
 (function () {
-  var H = ['id','uid','fileId','questionSnapshot','reason','note','reportedBy','reportedAt','status','optionsSnapshot','correctIndex','chosenIndex','section','appVersion','resolvedAt','resolvedBy','corrected','correctedSnapshot'];
+  var H = ['id','uid','fileId','questionSnapshot','reason','note','reportedBy','reportedAt','status','optionsSnapshot','correctIndex','chosenIndex','section','appVersion','resolvedAt','resolvedBy','corrected','correctedSnapshot','qid'];
   function row(o) {
     return [o.id,o.uid,o.fileId,o.q,'typo','n','stu','2026-10-01T00:00:00Z','resolved',
-      JSON.stringify(o.options),0,1,'practice','2.06',o.resolvedAt,'admin','TRUE',JSON.stringify(o.snapshot)];
+      JSON.stringify(o.options),0,1,'practice','2.06',o.resolvedAt,'admin','TRUE',JSON.stringify(o.snapshot),o.qid || ''];
   }
   var rows = [H,
-    row({ id:'R1', uid:'FA_50', fileId:'FA', q:'trim A', options:['30','60'], resolvedAt:'2026-10-31T09:00:00Z',
+    row({ id:'R1', uid:'FA_50', fileId:'FA', q:'trim A', qid:48213, options:['30','60'], resolvedAt:'2026-10-31T09:00:00Z',
       snapshot:{ uid:'corr_a1', at:'2026-10-31T09:12:44Z',
         before:{ question:'51. bearing 60 deg', options:['30','60','120','150'] },
         after:{ question:'51. bearing 63 deg', options:['30','63','120','150'], correctIndex:1, explanation:'x' },
@@ -93,6 +93,7 @@ console.log('GAS sync harness: all assertions passed');
   assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(c.correctedAt), 'correctedAt must be ISO-8601');
   assert.equal(c.after.correctIndex, 1);
   assert.equal(c.before.options.length, 4);
+  assert.equal(c.qid, 48213);
 
   var legacy = p2.corrections.filter(function (x) { return x.uid === 'R3'; })[0];
   assert.equal(legacy.after.correctIndex, 1);

@@ -1,5 +1,19 @@
 # Changes (v1.63 Supabase · v1.45 Apps Script)
 
+## 14 November 2026 — reports, corrections, Student 360
+- `question_reports.qid` and `correction_events` migration (idempotent).
+- `reportQuestion` stores qid and returns both `id` and `reportId`.
+- `myQuestionReports` returns account-scoped reports with qid and correction data.
+- `adminListQuestionReports` returns qid and groups open reporters by qid when present.
+- `adminGetQuestion` / `adminUpdateQuestion` prefer qid, validate `expectedQ`, close
+  every open report for the question, and write one correction event per edit.
+- `adminApplyCorrections` applies a batch with per-item results, duplicate detection,
+  stale-question conflicts, and one file refresh per affected file.
+- `syncCorrectionsSince` reads the event log (with report fallback) and emits qid for
+  the Drive-to-Neon pipeline.
+- Student 360 `adminGetStudentOverview` endpoint.
+- Handler test script fixed so all suites run, not just the first file argument.
+
 ## Removed (not needed in production)
 `gas/debug.gs` (wipe/reset helpers), `gas/migrate-files.gs`, `gas/content-index.gs`,
 `client/js/api-adapter.js` (unused second router), `scripts/verify.ps1` and the

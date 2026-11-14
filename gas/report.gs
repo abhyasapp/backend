@@ -84,7 +84,7 @@
 const QREPORT_HEADERS = [
   "id","uid","fileId","questionSnapshot","reason","note","reportedBy","reportedAt","status",
   "optionsSnapshot","correctIndex","chosenIndex","section","appVersion","resolvedAt","resolvedBy","corrected",
-  "correctedSnapshot"
+  "correctedSnapshot","qid"
 ];
 const QREPORT_REASONS = ["wrong_answer","unclear","typo","incomplete","image_problem","other"];
 const QREPORT_SECTIONS = [
@@ -125,6 +125,7 @@ function rowToQReport_(row) {
   return {
     id: row[0] || "",
     uid: uid,
+    qid: row.length > 18 && String(row[18] || "").match(/^\d+$/) ? Number(row[18]) : null,
     fileId: row[2] || "",
     questionNumber: m ? Number(m[2]) + 1 : null,
     questionSnapshot: row[3] || "",
@@ -172,6 +173,7 @@ function normalizeReportPayload_(p) {
     ? String(p.section) : "other";
   return { value: {
     uid: uid,
+    qid: String(p.qid || "").match(/^\d+$/) ? String(p.qid) : "",
     fileId: m ? m[1] : uid,
     reason: reason,
     note: sanitizeSheetField_(String(p.note || "").trim().slice(0, 500)),
@@ -264,7 +266,7 @@ function reportQuestion(p) {
     const sheet = getQReportsSheet_();
     const data = sheet.getDataRange().getValues();
     for (let i = 1; i < data.length; i++) {
-      if (String(data[i][1]) === r.uid &&
+      if ((String(data[i][1]) === r.uid || (r.qid && String(data[i][18] || "") === r.qid)) &&
           String(data[i][6]) === username &&
           String(data[i][8]) === "open") {
         return { success: true, message: "You've already reported this question \u2014 it's in the queue." };
@@ -274,7 +276,7 @@ function reportQuestion(p) {
       Utilities.getUuid(), r.uid, r.fileId, r.snapshot, r.reason, r.note,
       username, new Date().toISOString(), "open",
       r.optionsSnapshot, r.correctIndex, r.chosenIndex, r.section, r.appVersion,
-      "", "", "", ""
+      "", "", "", "", r.qid
     ]);
     _invalidateSheet_(QREPORTS_SHEET);
     return { success: true, message: "Thanks \u2014 this has been sent for review." };
@@ -296,12 +298,14 @@ function adminListQuestionReports(p) {
   const openBy = {};
   reports.forEach(r => {
     if (r.status === "open") {
-      (openBy[r.uid] = openBy[r.uid] || {})[r.reportedBy] = true;
+      const key = r.qid ? "q:" + r.qid : "u:" + r.uid;
+      (openBy[key] = openBy[key] || {})[r.reportedBy] = true;
     }
   });
   reports.forEach(r => {
+    const key = r.qid ? "q:" + r.qid : "u:" + r.uid;
     r.openReporters = r.status === "open"
-      ? Object.keys(openBy[r.uid] || {}).length : 0;
+      ? Object.keys(openBy[key] || {}).length : 0;
   });
   reports.sort((a, b) => {
     if (a.status === "open" && b.status !== "open") return -1;
@@ -344,9 +348,11 @@ function adminUpdateQuestionReportStatus(p) {
     if (status === "resolved") {
       const data = sheet.getDataRange().getValues();
       const uid = String(found.row[1] || "");
+      const qid = String(found.row[18] || "");
       for (let i = 1; i < data.length; i++) {
         if (i + 1 === found.rowIndex) continue;
-        if (String(data[i][1]) === uid && String(data[i][8]) === "open") {
+        if ((String(data[i][1]) === uid || (qid && String(data[i][18] || "") === qid)) &&
+            String(data[i][8]) === "open") {
           sheet.getRange(i + 1, 9).setValue("resolved");
           sheet.getRange(i + 1, 15, 1, 3).setValues([stamp]);
           alsoClosed++;
@@ -906,6 +912,7 @@ function syncCorrectionsSince(p) {
       /* Per-edit id: half of the (uid, corrected_at) idempotency key, so a
          second edit or a Restore is not mistaken for already_applied. */
       uid: String(snap.uid || r.id || r.uid),
+      qid: r.qid || null,
       /* ISO-8601 string: a timestamptz column rejects epoch-ms integers. */
       correctedAt: new Date(atMs).toISOString(),
       fileId: r.fileId,
