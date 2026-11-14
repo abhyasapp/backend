@@ -106,6 +106,11 @@ assert.equal(r.corrections[1].qid, 48214);
 assert.equal(r.corrections[0].after.question, '13. New stem');
 ok('syncCorrectionsSince emits qid-bearing events for Drive -> Neon');
 
+r = await call(R.synccorrectionssince, { key: 'pipeline-test-key', since: Date.parse(at), limit: 500 });
+assert.equal(r.success, true);
+assert.equal(r.count, 0);
+ok('syncCorrectionsSince treats the watermark as exclusive');
+
 r = await call(R.synccorrectionssince, { key: 'wrong', since: 0 });
 assert.equal(r.success, false);
 assert.equal(r.code, 'unauthorized');

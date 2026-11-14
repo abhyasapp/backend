@@ -11,6 +11,8 @@
   stale-question conflicts, and one file refresh per affected file.
 - `syncCorrectionsSince` reads the event log (with report fallback) and emits qid for
   the Drive-to-Neon pipeline.
+- `syncCorrectionsSince` treats the pipeline watermark as exclusive, so a queued
+  correction is not fetched and re-queued on every scheduled run.
 - Student 360 `adminGetStudentOverview` endpoint.
 - Handler test script fixed so all suites run, not just the first file argument.
 

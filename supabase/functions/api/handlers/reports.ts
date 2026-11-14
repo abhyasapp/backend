@@ -629,7 +629,9 @@ export async function synccorrectionssince(params: Record<string, unknown>) {
     const after = safeJsonParse<Record<string, any> | null>(ev.after, null);
     if (!after || !String(after.question || '').trim()) continue;
     const atMs = new Date(String(ev.corrected_at || '')).getTime();
-    if (!isFinite(atMs) || atMs < since) continue;
+    // The watermark is the newest timestamp already delivered. Treat it as
+    // exclusive so a queued correction is not fetched again on every run.
+    if (!isFinite(atMs) || atMs <= since) continue;
     const before = safeJsonParse<Record<string, any>>(ev.before, {});
     const m = String(ev.uid || '').match(/^(.+)_(\d+)$/);
     const qid = qidString(ev.qid);
@@ -671,7 +673,7 @@ export async function synccorrectionssince(params: Record<string, unknown>) {
     if (!after || !String(after.question || '').trim()) continue;
 
     const atMs = new Date(String(snap.at || r.resolved_at || '')).getTime();
-    if (!isFinite(atMs) || atMs < since) continue;
+    if (!isFinite(atMs) || atMs <= since) continue;
 
     const before = (snap.before && typeof snap.before === 'object')
       ? snap.before
