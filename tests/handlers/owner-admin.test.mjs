@@ -93,6 +93,7 @@ ok('audit log entries written');
 // 8. getfile returns parsed result (+ legacy content)
 DB.tables.users.push({ username: 'stu', status: 'active', permanent_access: 'true', session_token: 'h:' + Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('tkn'))).toString('hex'), session_token_expires_at: String(Date.now() + 1e6) });
 DB.storage['weekly-sets/w1.json'] = JSON.stringify({ questions: [{ q: 'a', correct: 1 }] });
+DB.tables.weekly_sets = [{ file_id: 'w1.json', release_at: '2020-01-01T00:00:00.000Z' }];
 r = await call(Content.getfile, { username: 'stu', token: 'tkn', fileId: 'weekly-sets/w1.json' });
 assert.equal(r.success, true); assert.deepEqual(r.result, { questions: [{ q: 'a', correct: 1 }] }); assert.equal(typeof r.content, 'string');
 r = await call(Content.getfiles, { username: 'stu', token: 'tkn', fileIds: 'weekly-sets/w1.json' });

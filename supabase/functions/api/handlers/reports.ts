@@ -1,9 +1,11 @@
-import { supabase } from '../_shared/db.ts';
+import { supabase, selectAll } from '../_shared/db.ts';
 import { json, dbMsg } from '../_shared/http.ts';
-import { authUser, authAdmin } from '../_shared/auth.ts';
+import { authUser, authAdmin, requireAccess } from '../_shared/auth.ts';
 import { CORRECTIONS_SETTING_KEY } from '../_shared/config.ts';
 import { randId } from '../_shared/crypto.ts';
-import { markFileCorrected } from '../_shared/utils.ts';
+import { markFileCorrected, readProgress, extractCorrectAnswers } from '../_shared/utils.ts';
+import { chunk } from '../_shared/pure.ts';
+import { rlBlocked, rlHit, RL_TOO_MANY } from '../_shared/rate-limit.ts';
 
 function safeJsonParse<T = unknown>(s: unknown, fallback: T): T {
   if (typeof s !== 'string' || !s) return fallback;
@@ -67,6 +69,16 @@ function correctionSnapshot(uid: string, at: string, before: any, after: any) {
   };
 }
 
+function validateCorrection(
+  after: { question: string; options: string[]; correctIndex: number | null },
+  before: { options: string[] },
+): string {
+  if (!after.question.trim()) return 'Question text is required.';
+  if (before.options.length && after.options.length < 2) return 'A question with options needs at least two options.';
+  if (after.options.length && after.correctIndex !== null && after.correctIndex >= after.options.length) return 'Correct answer index is out of range.';
+  return '';
+}
+
 async function writeCorrectionEvent(row: Record<string, unknown>): Promise<{ error?: unknown }> {
   const { error } = await supabase.from('correction_events').insert(row);
   return { error };
@@ -76,19 +88,24 @@ async function closeOpenReports(opts: {
   reportId?: string; qid?: string; uid?: string; admin: string; at: string; after: any; close: boolean;
 }): Promise<number> {
   if (!opts.close) return 0;
-  const { data } = await supabase.from('question_reports').select('id,uid,qid').eq('status', 'open').limit(1000);
+  // Look up exactly the open reports this correction covers (the old version scanned only the first 1000 open reports).
+  const ids = new Set<string>();
+  const collect = async (col: string, val: string) => {
+    const { data } = await supabase.from('question_reports').select('id').eq('status', 'open').eq(col, val).limit(5000);
+    (data || []).forEach(r => ids.add(String(r.id)));
+  };
+  if (opts.reportId) await collect('id', opts.reportId);
+  if (opts.qid) await collect('qid', opts.qid);
+  else if (opts.uid) await collect('uid', opts.uid);
+
   const patch = {
     status: 'resolved', resolved_at: opts.at, resolved_by: opts.admin,
     corrected: 'true', corrected_snapshot: JSON.stringify(opts.after),
   };
   let closed = 0;
-  for (const r of (data || [])) {
-    const sameReport = opts.reportId && String(r.id) === opts.reportId;
-    const sameQid = opts.qid && qidString(r.qid) === opts.qid;
-    const sameUid = !opts.qid && opts.uid && String(r.uid) === opts.uid;
-    if (!sameReport && !sameQid && !sameUid) continue;
-    await supabase.from('question_reports').update(patch).eq('id', r.id);
-    closed++;
+  for (const part of chunk([...ids], 100)) {
+    const { error } = await supabase.from('question_reports').update(patch).in('id', part);
+    if (!error) closed += part.length;
   }
   return closed;
 }
@@ -96,9 +113,11 @@ async function closeOpenReports(opts: {
 export async function reportquestion(params: Record<string, unknown>) {
   const auth = await authUser(params);
   if (!auth.ok) return json(auth.error);
-  const uid = String(params.uid || '').trim();
-  const reason = String(params.reason || '').trim();
+  const uid = String(params.uid || '').trim().slice(0, 200);
+  const reason = String(params.reason || '').trim().slice(0, 100);
   if (!uid || !reason) return json({ success: false, error: 'uid_and_reason_required' });
+  const rlKey = 'rpt:' + auth.username.toLowerCase();
+  if (await rlBlocked(rlKey, 40)) return json(RL_TOO_MANY);
 
   const { data: existing } = await supabase.from('question_reports').select('id').eq('reported_by', auth.username).eq('uid', uid).eq('status', 'open').limit(1);
   if (existing && existing[0]) return json({ success: true, id: existing[0].id, deduped: true });
@@ -124,18 +143,26 @@ export async function reportquestion(params: Record<string, unknown>) {
 
   const id = 'RPT-' + Date.now().toString(36) + '-' + randId();
   const qid = qidString(params.qid);
-  const fileId = asStr(p.file_id) || (uid.match(/^(.+)_\d+$/) || [])[1] || '';
+  const fileId = (asStr(p.file_id) || (uid.match(/^(.+)_\d+$/) || [])[1] || '').slice(0, 200);
+  // The columns are TEXT NOT NULL DEFAULT '': never send null, and accept "2" as well as 2.
+  const idxText = (v: unknown): string => {
+    const n = typeof v === 'number' ? v : (typeof v === 'string' && /^\d{1,2}$/.test(v.trim()) ? Number(v) : NaN);
+    return Number.isInteger(n) && n >= 0 && n < 100 ? String(n) : '';
+  };
+  const optionsSnap = safeSnap(p.options_snapshot, '[]');
+  await rlHit(rlKey, 60 * 60 * 1000);
 
   const { error } = await supabase.from('question_reports').insert({
     id, uid, qid,
     file_id: fileId,
-    question_snapshot: asStr(p.question_snapshot),
-    options_snapshot: safeSnap(p.options_snapshot, '[]'),
-    correct_index: Number.isInteger(p.correct_index) ? p.correct_index : null,
-    chosen_index: Number.isInteger(p.chosen_index) ? p.chosen_index : null,
-    reason, note: asStr(p.note),
+    question_snapshot: asStr(p.question_snapshot).slice(0, 4000),
+    options_snapshot: optionsSnap.length <= 8000 ? optionsSnap : '[]',
+    // Omitted when invalid so the column default applies (a null would violate NOT NULL).
+    ...(idxText(p.correct_index) !== '' ? { correct_index: idxText(p.correct_index) } : {}),
+    ...(idxText(p.chosen_index) !== '' ? { chosen_index: idxText(p.chosen_index) } : {}),
+    reason, note: asStr(p.note).slice(0, 1000),
     reported_by: auth.username, reported_at: new Date().toISOString(), status: 'open',
-    section: asStr(p.section), app_version: asStr(p.app_version),
+    section: asStr(p.section).slice(0, 100), app_version: asStr(p.app_version).slice(0, 30),
     resolved_at: '', resolved_by: '', corrected: '', corrected_snapshot: '',
   });
   if (error) return json({ success: false, error: dbMsg(error) });
@@ -174,7 +201,7 @@ export async function getcorrections(params: Record<string, unknown>) {
     }
   } catch { /* ignore */ }
 
-  const { data: reports } = await supabase.from('question_reports').select('uid,resolved_at').eq('reported_by', auth.username).eq('status', 'resolved').order('resolved_at', { ascending: false }).limit(50);
+  const { data: reports } = await supabase.from('question_reports').select('uid,qid,resolved_at').eq('reported_by', auth.username).eq('status', 'resolved').order('resolved_at', { ascending: false }).limit(50);
   const resolvedMine = (reports || []).map(r => ({
     uid: String(r.uid || ''),
     qid: qidString(r.qid) ? Number(qidString(r.qid)) : null,
@@ -183,16 +210,32 @@ export async function getcorrections(params: Record<string, unknown>) {
   return json({ success: true, now: Date.now(), files, resolvedMine });
 }
 
+const HARD_CACHE_KEY = 'private_hard_questions';
+const HARD_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
 export async function gethardquestions(params: Record<string, unknown>) {
   const auth = await authUser(params);
   if (!auth.ok) return json(auth.error);
-  const { data: rows } = await supabase.from('progress').select('data');
+  const gate = requireAccess(auth);
+  if (gate) return json(gate);
+
+  // Scanning every student's progress is expensive: serve a cached result for a few hours.
+  try {
+    const { data: cached } = await supabase.from('settings').select('value').eq('key', HARD_CACHE_KEY).limit(1);
+    if (cached && cached[0]) {
+      const c = JSON.parse(String(cached[0].value || '{}'));
+      if (c && c.map && Date.now() - Number(c.at || 0) < HARD_CACHE_TTL_MS) return json({ success: true, map: c.map, cached: true });
+    }
+  } catch { /* recompute */ }
+
+  let rows: any[];
+  try { rows = await selectAll('progress', 'username,data', { orderBy: 'username' }); }
+  catch (e) { return json({ success: false, error: dbMsg(e) }); }
   const tally: Record<string, { n: number; w: number }> = {};
-  (rows || []).forEach((row: { data?: string }) => {
-    let parsed: unknown;
-    try { parsed = JSON.parse(String(row.data || '{}')); } catch { return; }
-    const sessions = (parsed as any)?.prog?.sessions;
-    if (!Array.isArray(sessions)) return;
+  for (const row of rows) {
+    const parsed = await readProgress(row.data);   // understands gz1: compressed rows
+    const sessions = parsed?.prog?.sessions;
+    if (!Array.isArray(sessions)) continue;
     for (const s of sessions) {
       const qres = (s as any)?.qres;
       if (!Array.isArray(qres)) continue;
@@ -203,9 +246,10 @@ export async function gethardquestions(params: Record<string, unknown>) {
         r.n++; if (!(qr as any).ok) r.w++;
       }
     }
-  });
+  }
   const map: Record<string, number> = {};
   Object.keys(tally).forEach(uid => { const r = tally[uid]; if (r.n >= 20) map[uid] = Math.round((r.w / r.n) * 100); });
+  try { await supabase.from('settings').upsert({ key: HARD_CACHE_KEY, value: JSON.stringify({ at: Date.now(), map }) }, { onConflict: 'key' }); } catch { /* cache is best-effort */ }
   return json({ success: true, map });
 }
 
@@ -387,6 +431,8 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
       explanation: String(fields.explanation || ''),
     };
     if (!after.question.trim()) return json({ success: false, error: 'Question text is required.' });
+    const invalid = validateCorrection(after, beforeEdit);
+    if (invalid) return json({ success: false, error: invalid });
 
     // Per-edit event: (dedupe_key, corrected_at) is the pipeline's idempotency
     // key, so a re-edit needs a new correctedAt from the client.
@@ -403,7 +449,11 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
       return json({ success: false, error: dbMsg(ev.error) });
     }
 
-    arr[at].q = fields.q; arr[at].options = fields.options; arr[at].correct = fields.correct; arr[at].explanation = fields.explanation;
+    // Write exactly what the event log records (not the raw client payload), and never blank an existing answer.
+    arr[at].q = after.question;
+    if (after.options.length) arr[at].options = after.options;
+    if (after.correctIndex !== null) arr[at].correct = after.correctIndex;
+    arr[at].explanation = after.explanation;
     const newContent = JSON.stringify(raw);
     const { error: upErr } = await supabase.storage.from('subjective-content').upload(fileId, newContent, { upsert: true, contentType: 'application/json' });
     if (upErr) {
@@ -455,6 +505,7 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
   type Pending = {
     entry: any; fileId: string; dedupeKey: string; event: Record<string, unknown>;
     qid: string; reportId: string; uid: string; after: any; close: boolean;
+    apply: () => void;
   };
   const entries: any[] = [];
   const pending: Pending[] = [];
@@ -519,14 +570,19 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
         correctIndex: Number.isInteger(after.correctIndex) ? after.correctIndex : null,
         explanation: String(after.explanation || ''),
       };
-      q.q = cleanAfter.question;
-      q.options = cleanAfter.options;
-      q.correct = cleanAfter.correctIndex;
-      q.explanation = cleanAfter.explanation;
+      const invalid = validateCorrection(cleanAfter, before);
+      if (invalid) throw new Error(invalid);
+      // Applied to the in-memory file only AFTER the event row is saved (see below).
+      const apply = () => {
+        q.q = cleanAfter.question;
+        if (cleanAfter.options.length) q.options = cleanAfter.options;
+        if (cleanAfter.correctIndex !== null) q.correct = cleanAfter.correctIndex;
+        q.explanation = cleanAfter.explanation;
+      };
 
       const editUid = qid ? `q${qid}` : (uid || `${fileId}_${at}`);
       pending.push({
-        entry, fileId, dedupeKey, qid, reportId, uid, after: cleanAfter,
+        entry, fileId, dedupeKey, qid, reportId, uid, after: cleanAfter, apply,
         close: !(item.closeReport === false || item.closeReport === 'false' || item.closeReport === 0),
         event: {
           dedupe_key: dedupeKey, uid: editUid, qid, file_id: fileId,
@@ -542,23 +598,36 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
     }
   }
 
+  // Same order as adminupdatequestion: event log FIRST, file SECOND, roll the event back if the
+  // file save fails. The pipeline never sees an unsaved edit and a file never changes without an event.
+  const written: Pending[] = [];
+  for (const p of pending) {
+    const ev = await writeCorrectionEvent(p.event);
+    if (ev.error) {
+      if (String((ev.error as any)?.code || '') === '23505') { p.entry.ok = true; p.entry.duplicate = true; continue; }
+      p.entry.ok = false; p.entry.error = dbMsg(ev.error);
+      continue;
+    }
+    p.apply();
+    written.push(p);
+  }
+
   // Save each changed file once. A file failure fails only that file's items.
+  const touched = new Set(written.map(p => p.fileId));
   const failedFiles = new Set<string>();
   for (const [fileId, file] of files) {
+    if (!touched.has(fileId)) continue;
     const { error } = await supabase.storage.from('subjective-content')
       .upload(fileId, JSON.stringify(file.raw), { upsert: true, contentType: 'application/json' });
     if (error) failedFiles.add(fileId);
   }
 
   const savedFiles = new Set<string>();
-  for (const p of pending) {
+  for (const p of written) {
     if (failedFiles.has(p.fileId)) {
+      await supabase.from('correction_events').delete()
+        .eq('dedupe_key', p.dedupeKey).eq('corrected_at', String(p.event.corrected_at));
       p.entry.ok = false; p.entry.error = 'Could not save the file.';
-      continue;
-    }
-    const ev = await writeCorrectionEvent(p.event);
-    if (ev.error) {
-      p.entry.ok = false; p.entry.error = dbMsg(ev.error);
       continue;
     }
     p.entry.ok = true;
@@ -616,11 +685,16 @@ export async function synccorrectionssince(params: Record<string, unknown>) {
 
   // New corrections live in the event log. Fall back to the report snapshot
   // for databases that have not applied the qid/event migration yet.
+  // Read events strictly AFTER the watermark, oldest first. (Fetching the newest N and filtering
+  // in JS dropped older events permanently once more than N were queued, because the watermark
+  // then advanced past them.) limit+1 lets us report `truncated` accurately.
   const eventRows = await supabase.from('correction_events').select('*')
-    .order('corrected_at', { ascending: false }).limit(2000);
-  const { data, error } = await supabase.from('question_reports')
-    .select('*').eq('status', 'resolved').eq('corrected', 'true');
-  if (error) return json({ success: false, error: dbMsg(error) }, 500);
+    .gt('corrected_at', new Date(since).toISOString())
+    .order('corrected_at', { ascending: true }).limit(limit + 1);
+  let data: any[];
+  try {
+    data = await selectAll('question_reports', '*', { orderBy: 'id', apply: q => q.eq('status', 'resolved').eq('corrected', 'true') });
+  } catch (e) { return json({ success: false, error: dbMsg(e) }, 500); }
 
   const asInt = (v: unknown): number | null => Number.isInteger(v) && (v as number) >= 0 ? v as number : null;
   const byKey = new Map<string, any>();
@@ -728,7 +802,7 @@ export async function synccorrectionssince(params: Record<string, unknown>) {
 export async function adminlistcorrections(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'qreports_view');
   if (!admin.ok) return json(admin.error);
-  const { data } = await supabase.from('question_reports').select('*').eq('status', 'resolved').eq('corrected', 'true');
+  const data = await selectAll('question_reports', '*', { orderBy: 'id', apply: q => q.eq('status', 'resolved').eq('corrected', 'true') });
   const all: any[] = []; const byFile: Record<string, any> = {}; const seen = new Set();
   (data || []).forEach(r => {
     const key = r.file_id + '#' + r.uid; if (seen.has(key)) return; seen.add(key);
@@ -751,7 +825,7 @@ export async function adminlistcorrections(params: Record<string, unknown>) {
 export async function adminexportcorrections(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'qreports_view');
   if (!admin.ok) return json(admin.error);
-  const { data } = await supabase.from('question_reports').select('*').eq('status', 'resolved').eq('corrected', 'true');
+  const data = await selectAll('question_reports', '*', { orderBy: 'id', apply: q => q.eq('status', 'resolved').eq('corrected', 'true') });
   const res = data || [];
   const payload = { version: 1, exportedAt: new Date().toISOString(), total: res.length, corrections: res };
   return json({ success: true, json: JSON.stringify(payload, null, 2), filename: 'corrections.json', count: res.length });
@@ -773,23 +847,22 @@ export async function adminmostmissedquestions(params: Record<string, unknown>) 
   const limit = Math.max(1, Math.min(100, Number(params.limit) || 20));
   const minAttempts = Math.max(1, Number(params.minAttempts) || 3);
 
-  const { data: rows } = await supabase.from('progress').select('username,data');
+  const rows = await selectAll('progress', 'username,data', { orderBy: 'username' });
   // FIX BUG-08: track unique usernames per uid instead of hardcoding 1.
   const tally: Record<string, { n: number; w: number; users: Set<string> }> = {};
-  (rows || []).forEach((row: { username?: string; data?: string }) => {
+  for (const row of rows) {
     const user = String(row.username || '');
-    try {
-      const parsed = JSON.parse(String(row.data || '{}'));
-      (parsed?.prog?.sessions || []).forEach((s: any) => {
-        (s.qres || []).forEach((qr: any) => {
-          if (!qr.uid) return;
-          const r = tally[qr.uid] || (tally[qr.uid] = { n: 0, w: 0, users: new Set() });
-          r.n++; if (!qr.ok) r.w++;
-          if (user) r.users.add(user);
-        });
+    const parsed = await readProgress(row.data);   // understands gz1: compressed rows
+    const sessions = Array.isArray(parsed?.prog?.sessions) ? parsed.prog.sessions : [];
+    sessions.forEach((s: any) => {
+      (s?.qres || []).forEach((qr: any) => {
+        if (!qr.uid) return;
+        const r = tally[qr.uid] || (tally[qr.uid] = { n: 0, w: 0, users: new Set() });
+        r.n++; if (!qr.ok) r.w++;
+        if (user) r.users.add(user);
       });
-    } catch { /* ignore */ }
-  });
+    });
+  }
 
   const results = Object.keys(tally).map(uid => {
     const r = tally[uid]; const fileId = uid.replace(/_\d+$/, '');
@@ -803,40 +876,56 @@ export async function adminmostmissedquestions(params: Record<string, unknown>) 
     };
   }).filter(r => r.total >= minAttempts).sort((a, b) => b.wrongRate - a.wrongRate).slice(0, limit);
 
-  return json({ success: true, results, truncated: false, totalRowsScanned: rows?.length || 0 });
+  return json({ success: true, results, truncated: false, totalRowsScanned: rows.length });
+}
+
+const MAX_UPLOAD_B64 = 7 * 1024 * 1024;   // ~5 MB of JSON
+
+function decodeJsonUpload(fileData: string): { bytes: Uint8Array; parsed: unknown } | { error: string } {
+  if (!fileData.startsWith('data:')) return { error: 'Invalid file data' };
+  const base64 = fileData.split(',')[1] || '';
+  if (!base64) return { error: 'Invalid file data' };
+  if (base64.length > MAX_UPLOAD_B64) return { error: 'File is too large (max ~5 MB).' };
+  let bytes: Uint8Array;
+  try { bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0)); } catch { return { error: 'Invalid file data' }; }
+  try { return { bytes, parsed: JSON.parse(new TextDecoder().decode(bytes)) }; }
+  catch { return { error: 'File is not valid JSON.' }; }
 }
 
 export async function adminuploadweeklysetfile(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'weeklysets_manage');
   if (!admin.ok) return json(admin.error);
-  const fileData = String(params.fileData || '');
   const filename = String(params.filename || 'weeklyset.json').replace(/[^\w.\-]+/g, '_');
-  if (!fileData.startsWith('data:')) return json({ success: false, error: 'Invalid file data' });
+  const dec = decodeJsonUpload(String(params.fileData || ''));
+  if ('error' in dec) return json({ success: false, error: dec.error });
+
+  // Reject unscorable sets NOW instead of when the first student submits.
+  const key = extractCorrectAnswers(dec.parsed);
+  if (!key || !key.length) return json({ success: false, error: 'No questions found in this file.' });
+  const missing = key.filter(k => k === undefined || k === null || k === '').length;
+  if (missing) return json({ success: false, error: `${missing} of ${key.length} questions have no correct answer.` });
+
   try {
-    const base64 = fileData.split(',')[1];
-    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
     const path = `sets/${Date.now()}-${filename}`;
-    const { error } = await supabase.storage.from('weekly-sets').upload(path, bytes, { contentType: 'application/json' });
+    const { error } = await supabase.storage.from('weekly-sets').upload(path, dec.bytes, { contentType: 'application/json' });
     if (error) throw error;
-    return json({ success: true, fileId: path, filename });
+    return json({ success: true, fileId: path, filename, questionCount: key.length });
   } catch (e) { return json({ success: false, error: String(e) }); }
 }
 
 export async function adminuploadsubjectivefile(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'subjective_import');
   if (!admin.ok) return json(admin.error);
-  const fileData = String(params.fileData || '');
   const filename = String(params.filename || 'subjective.json').replace(/[^\w.\-]+/g, '_');
-  if (!fileData.startsWith('data:')) return json({ success: false, error: 'Invalid file data' });
+  const dec = decodeJsonUpload(String(params.fileData || ''));
+  if ('error' in dec) return json({ success: false, error: dec.error });
+  const parsed: any = dec.parsed;
+  const arr = Array.isArray(parsed) ? parsed : (parsed?.questions || []);
+  if (!Array.isArray(arr)) return json({ success: false, error: 'Expected an array of questions.' });
   try {
-    const base64 = fileData.split(',')[1];
-    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
     const path = `questions/${Date.now()}-${filename}`;
-    const { error } = await supabase.storage.from('subjective-content').upload(path, bytes, { contentType: 'application/json' });
+    const { error } = await supabase.storage.from('subjective-content').upload(path, dec.bytes, { contentType: 'application/json' });
     if (error) throw error;
-    const text = new TextDecoder().decode(bytes);
-    const parsed = JSON.parse(text);
-    const arr = Array.isArray(parsed) ? parsed : (parsed.questions || []);
     return json({ success: true, fileId: path, filename, questionCount: arr.length, warning: null });
   } catch (e) { return json({ success: false, error: String(e) }); }
 }

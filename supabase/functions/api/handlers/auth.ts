@@ -7,7 +7,7 @@ import {
 } from '../_shared/auth.ts';
 import { rlBlocked, rlHit, rlClear, RL_WINDOW_MS, RL_TOO_MANY } from '../_shared/rate-limit.ts';
 import { PW_ITERATIONS, FUNCTION_VERSION, ADMIN_TOKEN_TTL_MS } from '../_shared/config.ts';
-import { ensureDefaultOwner, truthy, writeAuditLog, isReservedUsername } from '../_shared/owner.ts';
+import { ensureDefaultOwner, truthy, writeAuditLog, isReservedUsername, passwordProblem } from '../_shared/owner.ts';
 
 export async function ping() { return json({ success: true, pong: true, version: FUNCTION_VERSION, runtime: 'supabase' }); }
 
@@ -17,7 +17,8 @@ export async function getsettings() {
   if (error) return json({ success: false, error: dbMsg(error) });
   const settings: Record<string, string> = {};
   (data || []).forEach((r: { key: string; value: string }) => {
-    if (!/^(private_|secret_)/i.test(r.key)) settings[r.key] = r.value;
+    // adminEmail is read by the weekly-summary job only; never expose it to anonymous callers.
+    if (!/^(private_|secret_)/i.test(r.key) && r.key !== 'adminEmail') settings[r.key] = r.value;
   });
   return json({ success: true, settings });
 }
@@ -80,7 +81,11 @@ export async function login(params: Record<string, unknown>, req: Request) {
 
   await rlClear(rlUser);
   if (v.upgraded) {
+    const oldHash = String(user.pass_hash || '');
     await supabase.from('users').update({ pass_hash: v.upgraded }).eq('username', user.username);
+    // A promoted student's admin row shares this hash ("switch to admin" compares them);
+    // keep it in step or the link silently breaks after a hash upgrade.
+    await supabase.from('admins').update({ pass_hash: v.upgraded }).eq('username', user.username).eq('pass_hash', oldHash);
     user.pass_hash = v.upgraded;
   }
   if (String(user.status) === 'rejected') return json({ success: false, error: 'Account rejected. Contact admin.' });
@@ -142,9 +147,16 @@ export async function googlelogin(params: Record<string, unknown>, req: Request)
     let base = email.split('@')[0].replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 24) || 'user';
     let candidate = base;
     let n = 1;
+    // A derived username must not be reserved (admin, support, ...) or collide with an admin account.
+    const usernameTaken = async (c: string): Promise<boolean> => {
+      if (isReservedUsername(c)) return true;
+      const { data: u } = await supabase.from('users').select('username').eq('username', c).limit(1);
+      if (u && u[0]) return true;
+      const { data: a } = await supabase.from('admins').select('username').eq('username', c).limit(1);
+      return !!(a && a[0]);
+    };
     while (n < 50) {
-      const { data: dup } = await supabase.from('users').select('username').eq('username', candidate).limit(1);
-      if (!dup || !dup[0]) break;
+      if (!(await usernameTaken(candidate))) break;
       candidate = base + n; n++;
     }
     if (n >= 50) candidate = base + randId();
@@ -190,8 +202,9 @@ export async function signup(params: Record<string, unknown>, req: Request) {
 
   if (!/^[a-zA-Z0-9_.-]{3,30}$/.test(username)) return json({ success: false, error: 'Username must be 3-30 chars: letters, numbers, dots, dashes, underscores.' });
   if (isReservedUsername(username)) return json({ success: false, error: 'That username is reserved. Please choose another.' });
-  if (!password || password.length < 8) return json({ success: false, error: 'Password must be at least 8 characters.' });
-  if (password.length > 256) return json({ success: false, error: 'Password is too long.' });
+  if (!password) return json({ success: false, error: 'Password required.' });
+  const pwProblem = passwordProblem(password, username);   // same policy as admin passwords
+  if (pwProblem) return json({ success: false, error: pwProblem });
   if (!name) return json({ success: false, error: 'Name required.' });
   if (name.length > 80) return json({ success: false, error: 'Name is too long.' });
   if (email && (email.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return json({ success: false, error: 'Invalid email address.' });

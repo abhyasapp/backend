@@ -1,5 +1,7 @@
 import { supabase } from './db.ts';
-import { PROGRESS_HISTORY_MIN_GAP_MS, CORRECTIONS_SETTING_KEY, MAX_CORRECTIONS_KEPT } from './config.ts';
+import { PROGRESS_HISTORY_MIN_GAP_MS, PROGRESS_GZ_PREFIX, CORRECTIONS_SETTING_KEY, MAX_CORRECTIONS_KEPT } from './config.ts';
+import { hasTraversalSegment } from './pure.ts';
+import { isPdfBytes } from './crypto.ts';
 
 // ── progress ───────────────────────────────────────────────────────
 export function sameRevision(a: unknown, b: unknown): boolean {
@@ -58,7 +60,8 @@ export async function markFileCorrected(fileId: string): Promise<void> {
 
 // ── storage path validation ────────────────────────────────────────
 export function safeStoragePath(p: string): boolean {
-  return !!p && p.length <= 300 && !p.includes('..') && !p.startsWith('/') &&
+  // Reject only real traversal SEGMENTS ('..', '.'); names like 'a..b' are legal usernames.
+  return !!p && p.length <= 300 && !hasTraversalSegment(p) && !p.startsWith('/') &&
     !p.includes('\\') && !/[\u0000-\u001f]/.test(p);
 }
 export function ownedUploadPath(p: string, username: string, exts: string[]): boolean {
@@ -154,4 +157,47 @@ export function scoreAnswers(answers: (number | null)[], key: (number | string |
         (typeof expected === 'string' && String(a) === expected)) correct++;
   });
   return correct;
+}
+// ── progress decoding (gz1: = gzip+base64) ─────────────────────────
+/** Parses stored progress, transparently handling the gz1: compressed form. */
+export async function readProgress(raw: unknown): Promise<any> {
+  const data = String(raw || '');
+  if (!data) return {};
+  try {
+    if (data.startsWith(PROGRESS_GZ_PREFIX)) {
+      const bytes = Uint8Array.from(atob(data.slice(PROGRESS_GZ_PREFIX.length)), c => c.charCodeAt(0));
+      const text = await new Response(
+        new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
+      ).text();
+      return JSON.parse(text);
+    }
+    return JSON.parse(data);
+  } catch {
+    return {};
+  }
+}
+
+// ── storage object checks ──────────────────────────────────────────
+/** Exact-name stat of an object (size in bytes), or null when it doesn't exist. */
+export async function statObject(bucket: string, path: string): Promise<{ size: number } | null> {
+  if (!safeStoragePath(path)) return null;
+  const idx = path.lastIndexOf('/');
+  const dir = idx >= 0 ? path.slice(0, idx) : '';
+  const name = path.slice(idx + 1);
+  if (!name) return null;
+  const { data } = await supabase.storage.from(bucket).list(dir, { search: name, limit: 100 });
+  const hit = (data || []).find((f: any) => f.name === name) as any;
+  return hit ? { size: Number(hit.metadata?.size ?? 0) } : null;
+}
+
+/** Reads only the first bytes of a stored object (HTTP Range) and checks the %PDF- signature. */
+export async function looksLikePdf(bucket: string, path: string): Promise<boolean> {
+  try {
+    const { data } = await supabase.storage.from(bucket).createSignedUrl(path, 60);
+    if (!data) return false;
+    const r = await fetch(data.signedUrl, { headers: { Range: 'bytes=0-7' } });
+    if (!r.ok) return false;
+    const buf = new Uint8Array(await r.arrayBuffer());
+    return isPdfBytes(buf.slice(0, 8));
+  } catch { return false; }
 }

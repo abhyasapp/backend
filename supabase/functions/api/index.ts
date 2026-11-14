@@ -216,7 +216,11 @@ Deno.serve(async (req) => {
   // Body wins; query params fill any gaps.
   let params: Record<string, unknown> = {};
   if (req.method === 'POST') {
-    try { params = await req.json(); } catch { /* empty body → {} */ }
+    try {
+      const body = await req.json();
+      // Only a plain JSON object is a valid parameter bag (null/array/string would crash below).
+      if (body && typeof body === 'object' && !Array.isArray(body)) params = body as Record<string, unknown>;
+    } catch { /* empty body → {} */ }
   }
   const url = new URL(req.url);
   for (const [k, v] of url.searchParams.entries()) {
@@ -224,7 +228,8 @@ Deno.serve(async (req) => {
   }
 
   const action = String(params.action || '').toLowerCase();
-  const handler = ROUTES[action];
+  // Own-property lookup so inherited names such as 'constructor' are never treated as routes.
+  const handler = Object.hasOwn(ROUTES, action) ? ROUTES[action] : undefined;
 
   if (!handler) {
     // HTTP 200 (not 404) with migrationPending so the client's fallback logic

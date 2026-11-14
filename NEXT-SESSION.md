@@ -44,6 +44,18 @@ checkout, pull or delete unrelated files.
 `sync/apply_corrections.py` now resolves `qid` first and follows `canonical_id`
 hops before falling back to the old text/identity matcher.
 
+### Integrity and access hardening
+
+- Added `20261115000000_integrity_hardening.sql` (lookup/unique indexes,
+  Storage limits, atomic `rl_hit()`, service-role-only housekeeping).
+- Fail-closed trial access and rejected-session enforcement.
+- Paged PostgREST reads, exact Storage lookup, weekly answer hiding during the
+  exam window, verified PDF uploads and report/upload rate limits.
+- Apps Script fixes for gzip progress, authenticated hard-question stats,
+  weekly answer hiding, reset URL, `adminEmail`, POST-only correction sync and
+  the optional `LEGACY_API=off` switch.
+- API version is now **1.64**.
+
 ## Verification already run
 
 Backend:

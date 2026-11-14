@@ -21,6 +21,10 @@ export async function rlHit(key: string, windowMs: number): Promise<void> {
   else m.c++;
   if (memRL.size > 5000) { for (const [k, v] of memRL) if (v.r <= now) memRL.delete(k); }
   try {
+    // Atomic increment (public.rl_hit, migration 20261115000000): concurrent requests can no longer
+    // read the same count and under-count. Falls back to read-then-write if the function isn't deployed yet.
+    const { error: rpcErr } = await supabase.rpc('rl_hit', { p_key: key, p_window_ms: windowMs });
+    if (!rpcErr) return;
     const { data } = await supabase.from('rate_limits').select('count,reset_at').eq('key', key).limit(1);
     const row = data && data[0];
     if (!row || Number(row.reset_at) <= now) {

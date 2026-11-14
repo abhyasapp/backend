@@ -1,6 +1,6 @@
 // _shared/config.ts — shared constants for every handler in the API function.
 
-export const FUNCTION_VERSION = '1.63';
+export const FUNCTION_VERSION = '1.64';
 
 // Origin allow-list (also used by withCors in index.ts). Override in the
 // Supabase dashboard → Project Settings → Edge Functions → Secrets.
@@ -40,6 +40,15 @@ export const FILE_LEGACY_CONTENT = (Deno.env.get('FILE_LEGACY_CONTENT') || 'true
 // Progress history archiving
 export const PROGRESS_HISTORY_MIN_GAP_MS = 30 * 60 * 1000;   // 30 minutes
 export const PROGRESS_GZ_PREFIX = 'gz1:';
+
+// While a weekly exam window is open, getfile serves the set WITHOUT correct answers or
+// explanations (scoring happens server-side at submit). Set WEEKLY_HIDE_ANSWERS=false to
+// restore the old behaviour if a client still needs answers during the window.
+export const WEEKLY_HIDE_ANSWERS = (Deno.env.get('WEEKLY_HIDE_ANSWERS') || 'true').toLowerCase() !== 'false';
+
+// saveprogress: when true, an existing row can only be overwritten by a client that sends
+// baseUpdatedAt (prevents a stale device from silently clobbering newer progress).
+export const REQUIRE_BASE_REVISION = (Deno.env.get('REQUIRE_BASE_REVISION') || 'false').toLowerCase() === 'true';
 
 // Weekly test window
 export const WEEKLY_EXAM_WINDOW_MS = 12 * 60 * 60 * 1000;    // 12 hours

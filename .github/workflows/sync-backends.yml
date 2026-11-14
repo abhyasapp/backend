@@ -14,6 +14,10 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+  issues: write      # only used to report a failed scheduled run
+
 # Never run two syncs at once.
 concurrency:
   group: sync-backends
@@ -45,3 +49,16 @@ jobs:
           ARGS=""
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.force }}" = "true" ]; then ARGS="--force"; fi
           node scripts/sync.js $ARGS
+
+      # Scheduled workflows fail silently otherwise. One open issue at a time (no spam every 6 h).
+      - name: Report failed scheduled sync
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OPEN=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "Scheduled backend sync failed in:title" --json number --jq 'length')
+          if [ "$OPEN" = "0" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Scheduled backend sync failed" \
+              --body "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi

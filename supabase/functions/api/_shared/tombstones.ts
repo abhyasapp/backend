@@ -10,10 +10,12 @@ export async function recordDeletion(table: string, pks: string[]): Promise<void
   if (!clean.length) return;
   try {
     const now = new Date().toISOString();
-    await supabase.from('deleted_records').upsert(
+    const { error } = await supabase.from('deleted_records').upsert(
       clean.map((pk) => ({ table_name: table, pk: pk.toLowerCase(), deleted_at: now })),
       { onConflict: 'table_name,pk' },
     );
+    // supabase-js returns errors instead of throwing, so check explicitly.
+    if (error) console.error('[tombstone] upsert failed', table, error.message);
   } catch (e) {
     console.error('[tombstone] could not record deletion', table, e);
   }

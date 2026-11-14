@@ -85,5 +85,12 @@ export function detectImageType(bytes: Uint8Array): { mime: string; ext: string 
   if (b(0) === 0x52 && b(1) === 0x49 && b(2) === 0x46 && b(8) === 0x57 && b(9) === 0x45 && b(10) === 0x42 && b(11) === 0x50) {
     return { mime: 'image/webp', ext: 'webp' };
   }
+  // HEIC/HEIF (iPhone screenshots/photos): ISO-BMFF 'ftyp' box with a heic-family brand.
+  if (b(4) === 0x66 && b(5) === 0x74 && b(6) === 0x79 && b(7) === 0x70) {
+    const brand = String.fromCharCode(b(8), b(9), b(10), b(11));
+    if (['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1'].includes(brand)) {
+      return { mime: brand === 'mif1' || brand === 'msf1' ? 'image/heif' : 'image/heic', ext: brand === 'mif1' || brand === 'msf1' ? 'heif' : 'heic' };
+    }
+  }
   return null;
 }

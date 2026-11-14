@@ -3,7 +3,7 @@ export const DB = { tables: {}, storage: {} };
 const T = (n) => (DB.tables[n] ||= []);
 export function reset() { DB.tables = {}; DB.storage = {}; }
 class Q {
-  constructor(t) { this.t = t; this.f = []; this.op = 'select'; this.opts = {}; this.lim = null; this.ord = null; }
+  constructor(t) { this.t = t; this.f = []; this.op = 'select'; this.opts = {}; this.lim = null; this.ord = null; this.rng = null; }
   select(cols, opts = {}) { if (this.op === 'select') this.op = 'select'; this.opts = opts; this.sel = true; return this; }
   insert(v) { this.op = 'insert'; this.v = v; return this; }
   upsert(v, o = {}) { this.op = 'upsert'; this.v = v; this.o = o; return this; }
@@ -13,9 +13,13 @@ class Q {
   neq(c, v) { this.f.push((r) => String(r[c]) !== String(v)); return this; }
   in(c, a) { this.f.push((r) => a.map(String).includes(String(r[c]))); return this; }
   lt(c, v) { this.f.push((r) => String(r[c]) < String(v)); return this; }
+  lte(c, v) { this.f.push((r) => String(r[c]) <= String(v)); return this; }
+  gt(c, v) { this.f.push((r) => r[c] != null && String(r[c]) > String(v)); return this; }
+  gte(c, v) { this.f.push((r) => r[c] != null && String(r[c]) >= String(v)); return this; }
   ilike(c, v) { const re = new RegExp('^' + String(v).replace(/\\([\\%_])/g, '\u0000$1').replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.').replace(/\u0000(.)/g, '$1') + '$', 'i'); this.f.push((r) => re.test(String(r[c] ?? ''))); return this; }
   order(c, o = {}) { this.ord = [c, o.ascending === false ? -1 : 1]; return this; }
   limit(n) { this.lim = n; return this; }
+  range(from, to) { this.rng = [from, to]; return this; }
   then(res, rej) { return Promise.resolve(this.run()).then(res, rej); }
   run() {
     const rows = T(this.t);
@@ -40,6 +44,7 @@ class Q {
     let out = rows.filter(match).map((r) => ({ ...r }));
     const count = out.length;
     if (this.ord) out.sort((a, b) => (a[this.ord[0]] > b[this.ord[0]] ? 1 : -1) * this.ord[1]);
+    if (this.rng) out = out.slice(this.rng[0], this.rng[1] + 1);
     if (this.lim != null) out = out.slice(0, this.lim);
     return { data: this.opts.head ? null : out, error: null, count: this.opts.count ? count : null };
   }

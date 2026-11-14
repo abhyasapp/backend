@@ -35,6 +35,8 @@ owner promotes them. The last owner can never be deleted or demoted.
    (adds `admins.must_change_password` and the `deleted_records` tombstone table),
    then `supabase/migrations/20261114000000_report_qid_corrections.sql`
    (adds `question_reports.qid` and the `correction_events` log).
+   then `supabase/migrations/20261115000000_integrity_hardening.sql`
+   (lookup/unique indexes, Storage limits and the atomic rate-limit helper).
    All are idempotent; an existing database only needs the newer ones.
 2. **Edge Function**
    ```bash

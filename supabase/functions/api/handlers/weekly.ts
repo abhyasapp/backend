@@ -1,9 +1,9 @@
-import { supabase } from '../_shared/db.ts';
+import { supabase, selectAll } from '../_shared/db.ts';
 import { recordDeletion } from '../_shared/tombstones.ts';
 import { json, dbMsg } from '../_shared/http.ts';
 import { authUser, authAdmin, requireAccess } from '../_shared/auth.ts';
 import { WEEKLY_EXAM_WINDOW_MS } from '../_shared/config.ts';
-import { rowToWeeklySet, rowToWeeklyAttempt, weeklyMarks, extractCorrectAnswers, scoreAnswers } from '../_shared/utils.ts';
+import { rowToWeeklySet, rowToWeeklyAttempt, weeklyMarks, extractCorrectAnswers, scoreAnswers, statObject } from '../_shared/utils.ts';
 
 export async function listweeklysets(params: Record<string, unknown>) {
   const auth = await authUser(params);
@@ -173,8 +173,10 @@ export async function getweeklystanding(params: Record<string, unknown>) {
   const release = new Date(ws.releaseAt).getTime();
   if (isNaN(release) || Date.now() <= release + WEEKLY_EXAM_WINDOW_MS) return json({ success: true, ready: false, message: 'Rankings appear when the exam window closes.' });
 
-  const { data, error } = await supabase.from('weekly_attempts').select('*').eq('weekly_id', weeklyId);
-  if (error) return json({ success: false, error: dbMsg(error) });
+  // Page through ALL attempts: a plain select() stops at 1000 rows and would corrupt ranks.
+  let data: any[];
+  try { data = await selectAll('weekly_attempts', '*', { orderBy: 'username', apply: q => q.eq('weekly_id', weeklyId) }); }
+  catch (error) { return json({ success: false, error: dbMsg(error) }); }
 
   const me = auth.username.toLowerCase();
   const scores: number[] = [];
@@ -206,6 +208,9 @@ export async function admincreateweeklyset(params: Record<string, unknown>) {
   if (!title || !fileId) return json({ success: false, error: 'Title and fileId required.' });
   const releaseAt = new Date(releaseAtRaw);
   if (!releaseAtRaw || isNaN(releaseAt.getTime())) return json({ success: false, error: 'A valid release date/time is required.' });
+
+  // The file must already be in the weekly-sets bucket, otherwise nobody could ever be scored on it.
+  if (!(await statObject('weekly-sets', fileId))) return json({ success: false, error: 'File not found in weekly-sets storage. Upload it first.' });
 
   const { data: dupe } = await supabase.from('weekly_sets').select('id,title').eq('file_id', fileId).limit(1);
   const duplicateOf = dupe && dupe[0] ? String(dupe[0].title) : null;
@@ -268,8 +273,9 @@ export async function adminweeklysetresults(params: Record<string, unknown>) {
   const ws = wsRows && wsRows[0] ? rowToWeeklySet(wsRows[0]) : null;
   if (!ws) return json({ success: false, error: 'Weekly set not found.' });
 
-  const { data, error } = await supabase.from('weekly_attempts').select('*').eq('weekly_id', weeklyId);
-  if (error) return json({ success: false, error: dbMsg(error) });
+  let data: any[];
+  try { data = await selectAll('weekly_attempts', '*', { orderBy: 'username', apply: q => q.eq('weekly_id', weeklyId) }); }
+  catch (error) { return json({ success: false, error: dbMsg(error) }); }
 
   const attempts = (data || []).map(r => {
     const at = rowToWeeklyAttempt(r);

@@ -1,8 +1,9 @@
-import { supabase } from '../_shared/db.ts';
-import { json, dbMsg } from '../_shared/http.ts';
+import { supabase, selectAll } from '../_shared/db.ts';
+import { json, dbMsg, escLike } from '../_shared/http.ts';
 import { authAdmin, authUser } from '../_shared/auth.ts';
 import { ADMIN_FEATURE_KEYS, OWNER_ONLY_FEATURES, PAY_EXTS, ADMIN_TOKEN_TTL_MS } from '../_shared/config.ts';
-import { isStoragePath } from '../_shared/utils.ts';
+import { isStoragePath, readProgress } from '../_shared/utils.ts';
+import { chunk, kathmanduDay, toMs } from '../_shared/pure.ts';
 import { makeStoredHash, verifyPassword, randId, safeEqual } from '../_shared/crypto.ts';
 import { publicUser, issueAdminToken } from '../_shared/auth.ts';
 import {
@@ -46,7 +47,7 @@ export async function admintrends(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'dashboard');
   if (!admin.ok) return json(admin.error);
   const days = Math.max(7, Math.min(90, Number(params.days) || 30));
-  const { data: users } = await supabase.from('users').select('status,created_at,approved_at');
+  const users = await selectAll('users', 'username,status,created_at,approved_at', { orderBy: 'username' });
   const tz = 'Asia/Kathmandu';
   const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
   const dayKey = (t: number) => fmt.format(new Date(t));
@@ -78,7 +79,7 @@ export async function adminexpiringtrials(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'dashboard');
   if (!admin.ok) return json(admin.error);
   const hours = Math.max(1, Math.min(168, Number(params.hours) || 24));
-  const { data: users } = await supabase.from('users').select('*').eq('status', 'trial');
+  const users = await selectAll('users', 'username,name,email,mobile,status,created_at,approved_at,role,trial_expires_at,payment_status,permanent_access,access_type,access_expires_at,email_verified', { orderBy: 'username', apply: q => q.eq('status', 'trial') });
   const now = Date.now(); const cutoff = now + hours * 60 * 60 * 1000;
   const list: Array<Record<string, unknown>> = [];
   (users || []).forEach(u => {
@@ -98,11 +99,12 @@ export async function adminlistusers(params: Record<string, unknown>) {
   const limit = Math.min(Number(params.limit) || 3000, 3000);
   // FIX SCALE-04: only select fields publicUser needs.
   const cols = 'username,name,email,mobile,status,created_at,approved_at,role,trial_expires_at,payment_status,permanent_access,access_type,access_expires_at,email_verified';
-  const { data, error } = await supabase.from('users').select(cols).order('created_at', { ascending: false }).limit(limit);
-  if (error) return json({ success: false, error: dbMsg(error) });
+  let rows: any[];
+  try { rows = await selectAll('users', cols, { orderBy: 'created_at', thenBy: 'username', ascending: false, max: limit }); }
+  catch (error) { return json({ success: false, error: dbMsg(error) }); }
   const totalCount = await countRows('users');
-  const users = (data || []).map(publicUser);
-  return json({ success: true, users, totalCount, truncated: totalCount > limit });
+  const users = rows.map(publicUser);
+  return json({ success: true, users, totalCount, truncated: totalCount > users.length });
 }
 
 /* ── Student 360 ─────────────────────────────────────────────────────
@@ -115,36 +117,20 @@ function currentStreak(days: unknown): number {
   if (!set.size) return 0;
   const dayMs = 86400000;
   const now = Date.now();
-  const today = new Date(now).toISOString().slice(0, 10);
-  const yesterday = new Date(now - dayMs).toISOString().slice(0, 10);
+  // The app runs on Asia/Kathmandu; the client stores local day keys, so compare in that zone.
+  const today = kathmanduDay(now);
+  const yesterday = kathmanduDay(now - dayMs);
   if (!set.has(today) && !set.has(yesterday)) return 0;
   let offset = set.has(today) ? 0 : 1;
   let skip = 1;
   let n = 0;
   while (n <= 400) {
-    const day = new Date(now - offset * dayMs).toISOString().slice(0, 10);
+    const day = kathmanduDay(now - offset * dayMs);
     if (set.has(day)) { n++; offset++; continue; }
     if (skip > 0) { skip--; offset++; continue; }
     break;
   }
   return n;
-}
-
-async function readProgress(raw: unknown): Promise<any> {
-  const data = String(raw || '');
-  if (!data) return {};
-  try {
-    if (data.startsWith('gz1:')) {
-      const bytes = Uint8Array.from(atob(data.slice(4)), c => c.charCodeAt(0));
-      const text = await new Response(
-        new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
-      ).text();
-      return JSON.parse(text);
-    }
-    return JSON.parse(data);
-  } catch {
-    return {};
-  }
 }
 
 export async function admingetstudentoverview(params: Record<string, unknown>) {
@@ -208,8 +194,8 @@ export async function admingetstudentoverview(params: Record<string, unknown>) {
   let lastMs = 0;
   const bump = (v: unknown) => {
     if (!v) return;
-    const t = new Date(String(v)).getTime();
-    if (isFinite(t) && t > lastMs) lastMs = t;
+    const t = toMs(v);   // handles ISO strings AND epoch-ms values (sessions[].at, weekly submitted_at)
+    if (t > lastMs) lastMs = t;
   };
   sessions.forEach((s: any) => bump(s.at));
   bump(progressRows.data && progressRows.data[0] ? (progressRows.data[0] as any).updated_at : '');
@@ -282,6 +268,10 @@ export async function adminupdateuser(params: Record<string, unknown>) {
     const email = String(params.email).trim().toLowerCase();  // consistent with signup/updateprofile
     if (email.length > 120) return json({ success: false, error: 'Email address is too long.' });
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ success: false, error: 'Invalid email address.' });
+    if (email) {
+      const { data: dupEmail } = await supabase.from('users').select('username').ilike('email', escLike(email)).neq('username', username).limit(1);
+      if (dupEmail && dupEmail[0]) return json({ success: false, error: 'Another account already uses this email address.' });
+    }
     patch.email = email;
     if (email && email.toLowerCase() !== String(user.email || '').toLowerCase()) patch.email_verified = 'false';
   }
@@ -297,6 +287,10 @@ export async function adminupdateuser(params: Record<string, unknown>) {
   if (params.status !== undefined && params.status !== '') {
     if (!['trial', 'active', 'expired', 'payment_pending', 'rejected'].includes(String(params.status))) return json({ success: false, error: 'Invalid status.' });
     patch.status = params.status;
+    // Moving someone off 'active' must also drop permanent access, otherwise computeAccess still lets them in.
+    if (String(params.status) !== 'active' && params.permanentAccess === undefined) patch.permanent_access = 'false';
+    // A rejected account loses its current session immediately.
+    if (String(params.status) === 'rejected') { patch.session_token = ''; patch.session_token_expires_at = ''; }
   }
   if (params.permanentAccess !== undefined) patch.permanent_access = (params.permanentAccess === true || params.permanentAccess === 'true') ? 'true' : 'false';
 
@@ -323,6 +317,8 @@ export async function adminupdateuser(params: Record<string, unknown>) {
   if (error) return json({ success: false, error: dbMsg(error) });
 
   if (passwordChanged) await writeAuditLog(admin.username, 'Reset user password', username);
+  const changed = Object.keys(patch).filter(k => !['pass_hash', 'session_token', 'session_token_expires_at'].includes(k));
+  if (changed.length) await writeAuditLog(admin.username, 'Update user', username, changed.join(','));
   return json({ success: true, username });
 }
 
@@ -333,6 +329,9 @@ export async function admingrantaccess(params: Record<string, unknown>) {
   const duration = String(params.duration || '').trim();
   if (!username) return json({ success: false, error: 'Username required.' });
   if (['permanent', 'year'].indexOf(duration) === -1) return json({ success: false, error: "Duration must be 'permanent' or 'year'." });
+
+  const { data: target } = await supabase.from('users').select('username').eq('username', username).limit(1);
+  if (!target || !target[0]) return json({ success: false, error: 'User not found.' });
 
   const isYearly = duration === 'year';
   let expiresAtIso = '';
@@ -349,6 +348,7 @@ export async function admingrantaccess(params: Record<string, unknown>) {
     access_expires_at: expiresAtIso,
   }).eq('username', username);
   if (error) return json({ success: false, error: dbMsg(error) });
+  await writeAuditLog(admin.username, 'Grant access', username, duration);
   return json({ success: true, username, duration, accessExpiresAt: expiresAtIso });
 }
 
@@ -376,8 +376,12 @@ export async function admingrantaccessbatch(params: Record<string, unknown>) {
 
   // FIX SCALE-02: one round trip instead of N.
   const cleanNames = [...new Set(usernames.map(u => String(u || '').trim()).filter(Boolean))];
-  const { data: found } = await supabase.from('users').select('username').in('username', cleanNames);
-  const foundSet = new Set((found || []).map(r => String(r.username)));
+  // .in() filters travel in the URL: keep each request small (1000 names would exceed gateway limits).
+  const foundSet = new Set<string>();
+  for (const part of chunk(cleanNames, 100)) {
+    const { data: f } = await supabase.from('users').select('username').in('username', part);
+    (f || []).forEach(r => foundSet.add(String(r.username)));
+  }
 
   const results: any[] = usernames.map(raw => {
     const u = String(raw || '').trim();
@@ -387,12 +391,14 @@ export async function admingrantaccessbatch(params: Record<string, unknown>) {
   });
 
   const toUpdate = Array.from(foundSet);
-  if (toUpdate.length) {
-    const { error } = await supabase.from('users').update(patch).in('username', toUpdate);
-    if (error) {
-      for (const r of results) if (r.success) { r.success = false; r.error = dbMsg(error); }
-    }
+  const failed = new Map<string, string>();
+  for (const part of chunk(toUpdate, 100)) {
+    const { error } = await supabase.from('users').update(patch).in('username', part);
+    if (error) part.forEach(u => failed.set(u, dbMsg(error)));
   }
+  for (const r of results) if (r.success && failed.has(r.username)) { r.success = false; r.error = failed.get(r.username); }
+  const okNames = toUpdate.filter(u => !failed.has(u));
+  if (okNames.length) await writeAuditLog(admin.username, 'Grant access (batch)', okNames.slice(0, 50).join(','), `duration=${duration}, count=${okNames.length}`);
   return json({ success: true, duration, accessExpiresAt: expiresAtIso, results });
 }
 
@@ -439,12 +445,15 @@ export async function admindeleteusersbatch(params: Record<string, unknown>) {
 
   const cleanNames = [...new Set(usernames.map(u => String(u || '').trim()).filter(Boolean))];
 
-  // FIX BUG-12: skip admin-capable accounts.
-  const { data: adminsFound } = await supabase.from('admins').select('username').in('username', cleanNames);
-  const adminSet = new Set((adminsFound || []).map(r => String(r.username)));
-
-  const { data: usersFound } = await supabase.from('users').select('username').in('username', cleanNames);
-  const userSet = new Set((usersFound || []).map(r => String(r.username)));
+  // FIX BUG-12: skip admin-capable accounts. Lookups are chunked: .in() filters travel in the URL.
+  const adminSet = new Set<string>();
+  const userSet = new Set<string>();
+  for (const part of chunk(cleanNames, 100)) {
+    const { data: adminsFound } = await supabase.from('admins').select('username').in('username', part);
+    (adminsFound || []).forEach(r => adminSet.add(String(r.username)));
+    const { data: usersFound } = await supabase.from('users').select('username').in('username', part);
+    (usersFound || []).forEach(r => userSet.add(String(r.username)));
+  }
 
   const deletable = cleanNames.filter(u => userSet.has(u) && !adminSet.has(u));
 
@@ -456,30 +465,34 @@ export async function admindeleteusersbatch(params: Record<string, unknown>) {
     return { username: u, success: true };
   });
 
-  if (deletable.length) {
-    // FIX SCALE-02 + BUG-01: aggregate storage paths once.
-    const { data: payRows } = await supabase.from('payments').select('screenshot_url').in('username', deletable);
-    const { data: subjRows } = await supabase.from('subjective_submissions').select('pdf_file_id,pdf_original_backup_id').in('username', deletable);
+  const failed = new Map<string, string>();
+  const deletedOk: string[] = [];
+  for (const part of chunk(deletable, 50)) {
+    // FIX SCALE-02 + BUG-01: aggregate storage paths once per chunk.
+    const { data: payRows } = await supabase.from('payments').select('screenshot_url').in('username', part);
+    const { data: subjRows } = await supabase.from('subjective_submissions').select('pdf_file_id,pdf_original_backup_id').in('username', part);
     const payPaths = (payRows || []).map(r => String(r.screenshot_url || '')).filter(p => isStoragePath(p));
     const subjPaths = (subjRows || []).map(r => String(r.pdf_file_id || '')).filter(p => isStoragePath(p));
     const backupPaths = (subjRows || []).map(r => String(r.pdf_original_backup_id || '')).filter(p => isStoragePath(p));
 
     const tables = ['progress', 'progress_history', 'progress_backups', 'payments', 'push_tokens', 'weekly_attempts', 'weekly_starts', 'subjective_submissions'];
     for (const t of tables) {
-      await supabase.from(t).delete().in('username', deletable);
+      const { error: tErr } = await supabase.from(t).delete().in('username', part);
+      if (tErr) console.error('[admindeleteusersbatch] delete failed on', t, tErr.message);
     }
-    await supabase.from('question_reports').update({ reported_by: '[deleted user]' }).in('reported_by', deletable);
-    await supabase.from('logs').update({ target: '[deleted user]' }).in('target', deletable);
+    await supabase.from('question_reports').update({ reported_by: '[deleted user]' }).in('reported_by', part);
+    await supabase.from('logs').update({ target: '[deleted user]' }).in('target', part);
     if (payPaths.length) await supabase.storage.from('payments').remove(payPaths);
     if (subjPaths.length) await supabase.storage.from('subjective').remove(subjPaths);
     if (backupPaths.length) await supabase.storage.from('subjective-backups').remove(backupPaths);
-    const { error } = await supabase.from('users').delete().in('username', deletable);
-    if (error) {
-      for (const r of results) if (r.success) { r.success = false; r.error = dbMsg(error); }
-    } else {
-      await recordDeletion('users', deletable);
-      await writeAuditLog(admin.username, 'Delete users (batch)', deletable.slice(0, 50).join(','), `count=${deletable.length}`);
-    }
+    const { error } = await supabase.from('users').delete().in('username', part);
+    if (error) part.forEach(u => failed.set(u, dbMsg(error)));
+    else deletedOk.push(...part);
+  }
+  for (const r of results) if (r.success && failed.has(r.username)) { r.success = false; r.error = failed.get(r.username); }
+  if (deletedOk.length) {
+    await recordDeletion('users', deletedOk);
+    await writeAuditLog(admin.username, 'Delete users (batch)', deletedOk.slice(0, 50).join(','), `count=${deletedOk.length}`);
   }
   return json({ success: true, results });
 }
@@ -489,9 +502,10 @@ export async function adminlistpayments(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'payments_view');
   if (!admin.ok) return json(admin.error);
   const limit = Math.min(Number(params.limit) || 3000, 3000);
-  const { data, error } = await supabase.from('payments').select('*');
-  if (error) return json({ success: false, error: dbMsg(error) });
-  const all = data || []; const totalCount = all.length;
+  let all: any[];
+  try { all = await selectAll('payments', '*', { orderBy: 'username' }); }
+  catch (error) { return json({ success: false, error: dbMsg(error) }); }
+  const totalCount = all.length;
   const txOwners: Record<string, Set<string>> = {};
   all.forEach(p => { const tx = String(p.tx_id || '').trim().toLowerCase(); if (!tx) return; if (!txOwners[tx]) txOwners[tx] = new Set(); txOwners[tx].add(String(p.username || '')); });
 
@@ -516,8 +530,11 @@ export async function adminreviewpaymentsbatch(params: Record<string, unknown>) 
 
   const nowIso = new Date().toISOString();
   const cleanNames = [...new Set(usernames.map(u => String(u || '').trim()).filter(Boolean))];
-  const { data: found } = await supabase.from('payments').select('username').in('username', cleanNames);
-  const foundSet = new Set((found || []).map(r => String(r.username)));
+  const foundSet = new Set<string>();
+  for (const part of chunk(cleanNames, 100)) {
+    const { data: found } = await supabase.from('payments').select('username').in('username', part);
+    (found || []).forEach(r => foundSet.add(String(r.username)));
+  }
 
   const results: any[] = usernames.map(raw => {
     const u = String(raw || '').trim();
@@ -526,29 +543,25 @@ export async function adminreviewpaymentsbatch(params: Record<string, unknown>) 
     return { username: u, success: true };
   });
 
+  const payPatch: any = { status, reviewed_at: nowIso };
+  if (reason && status === 'rejected') payPatch.rejection_reason = reason;
+  const userPatch: Record<string, unknown> =
+    status === 'verified' ? { status: 'active', payment_status: 'verified', permanent_access: 'true', approved_at: nowIso, access_type: 'permanent', access_expires_at: '' }
+    : status === 'rejected' ? { status: 'expired', payment_status: 'rejected', permanent_access: 'false' }
+    : { status: 'payment_pending', payment_status: 'pending', permanent_access: 'false' };
+
   const toUpdate = Array.from(foundSet);
-  if (toUpdate.length) {
-    const payPatch: any = { status, reviewed_at: nowIso };
-    if (reason && status === 'rejected') payPatch.rejection_reason = reason;
+  const failed = new Map<string, string>();
+  for (const part of chunk(toUpdate, 100)) {
     // FIX BUG-13: check payment update errors.
-    const { error: payErr } = await supabase.from('payments').update(payPatch).in('username', toUpdate);
-    if (payErr) {
-      for (const r of results) if (r.success) { r.success = false; r.error = dbMsg(payErr); }
-    } else {
-      let userErr: unknown = null;
-      if (status === 'verified') {
-        const { error } = await supabase.from('users').update({ status: 'active', payment_status: 'verified', permanent_access: 'true', approved_at: nowIso, access_type: 'permanent', access_expires_at: '' }).in('username', toUpdate);
-        userErr = error;
-      } else if (status === 'rejected') {
-        const { error } = await supabase.from('users').update({ status: 'expired', payment_status: 'rejected', permanent_access: 'false' }).in('username', toUpdate);
-        userErr = error;
-      } else {
-        const { error } = await supabase.from('users').update({ status: 'payment_pending', payment_status: 'pending', permanent_access: 'false' }).in('username', toUpdate);
-        userErr = error;
-      }
-      if (userErr) for (const r of results) if (r.success) { r.success = false; r.error = dbMsg(userErr); }
-    }
+    const { error: payErr } = await supabase.from('payments').update(payPatch).in('username', part);
+    if (payErr) { part.forEach(u => failed.set(u, dbMsg(payErr))); continue; }
+    const { error: userErr } = await supabase.from('users').update(userPatch).in('username', part);
+    if (userErr) part.forEach(u => failed.set(u, dbMsg(userErr)));
   }
+  for (const r of results) if (r.success && failed.has(r.username)) { r.success = false; r.error = failed.get(r.username); }
+  const okNames = toUpdate.filter(u => !failed.has(u));
+  if (okNames.length) await writeAuditLog(admin.username, 'Review payments (batch): ' + status, okNames.slice(0, 50).join(','), `count=${okNames.length}`);
   return json({ success: true, status, results });
 }
 
@@ -571,6 +584,7 @@ export async function admindeletepayment(params: Record<string, unknown>) {
     const newStatus = trialExp > Date.now() ? 'trial' : 'expired';
     await supabase.from('users').update({ status: newStatus, payment_status: '' }).eq('username', username);
   }
+  await writeAuditLog(admin.username, 'Delete payment', username);
   return json({ success: true, deleted: username });
 }
 
@@ -598,6 +612,10 @@ export async function adminrevokescreenshotsharing(params: Record<string, unknow
 export async function getpaymentuploadurl(params: Record<string, unknown>) {
   const auth = await authUser(params);
   if (!auth.ok) return json(auth.error);
+  // Every call mints a fresh signed upload slot: cap how many one account can request.
+  const rlKey = 'payup:' + auth.username.toLowerCase();
+  if (await rlBlocked(rlKey, 20)) return json(RL_TOO_MANY);
+  await rlHit(rlKey, RL_WINDOW_MS);
   const extRaw = String(params.ext || 'png').replace(/[^a-z0-9]/gi, '').slice(0, 5).toLowerCase();
   const ext = PAY_EXTS.includes(extRaw) ? extRaw : 'png';
   const path = `${auth.username}/${Date.now()}-${randId()}.${ext}`;
@@ -629,10 +647,10 @@ export async function getpaymentstatus(params: Record<string, unknown>) {
 export async function adminclearprogressbackups(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'maintenance');
   if (!admin.ok) return json(admin.error);
-  const { data: existing } = await supabase.from('progress_backups').select('backup_id');
-  const deleted = (existing || []).length;
+  const deleted = await countRows('progress_backups');   // head count: not capped at 1000 rows
   const { error } = await supabase.from('progress_backups').delete().neq('backup_id', '');
   if (error) return json({ success: false, error: dbMsg(error) });
+  await writeAuditLog(admin.username, 'Clear progress backups', '', `deleted=${deleted}`);
   return json({ success: true, deleted });
 }
 
@@ -641,27 +659,36 @@ export async function adminpruneoldbackups(params: Record<string, unknown>) {
   if (!admin.ok) return json(admin.error);
   const days = Math.max(1, Math.min(3650, Number(params.daysToKeep) || 30));
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-  const { data: stale } = await supabase.from('progress_backups').select('backup_id').lt('created_at', cutoff);
-  const ids = (stale || []).map(r => String(r.backup_id));
   let deleted = 0;
-  if (ids.length) {
-    const { error } = await supabase.from('progress_backups').delete().in('backup_id', ids);
-    if (error) return json({ success: false, error: dbMsg(error) });
-    deleted = ids.length;
+  for (let round = 0; round < 200; round++) {
+    // neq('') so rows with a missing created_at are not mistaken for ancient ones ('' sorts before any date).
+    const { data: stale } = await supabase.from('progress_backups').select('backup_id')
+      .lt('created_at', cutoff).neq('created_at', '').limit(500);
+    const ids = (stale || []).map(r => String(r.backup_id));
+    if (!ids.length) break;
+    for (const part of chunk(ids, 100)) {
+      const { error } = await supabase.from('progress_backups').delete().in('backup_id', part);
+      if (error) return json({ success: false, error: dbMsg(error), deleted });
+      deleted += part.length;
+    }
+    if (ids.length < 500) break;
   }
+  await writeAuditLog(admin.username, 'Prune old backups', '', `deleted=${deleted}, daysToKeep=${days}`);
   return json({ success: true, deleted, daysToKeep: days });
 }
 
 export async function admintrimlogs(params: Record<string, unknown>) {
-  const admin = await authAdmin(params, 'maintenance');
+  // Owner-only: otherwise any 'maintenance' admin could erase the trail of their own actions.
+  const admin = await authAdmin(params, 'maintenance', { ownerOnly: true });
   if (!admin.ok) return json(admin.error);
   const keepLast = Math.max(100, Math.min(100000, Number(params.keepLast) || 5000));
-  const { data: ordered } = await supabase.from('logs').select('timestamp').order('timestamp', { ascending: false }).limit(keepLast);
-  if (!ordered || !ordered.length) return json({ success: true, deleted: 0, kept: 0 });
-  const oldestKept = String(ordered[ordered.length - 1].timestamp);
+  const { data: ordered } = await supabase.from('logs').select('timestamp').order('timestamp', { ascending: false }).range(keepLast - 1, keepLast - 1);
+  if (!ordered || !ordered.length) return json({ success: true, deleted: 0, kept: keepLast });
+  const oldestKept = String(ordered[0].timestamp);
   const { count } = await supabase.from('logs').select('*', { count: 'exact', head: true }).lt('timestamp', oldestKept);
   const { error } = await supabase.from('logs').delete().lt('timestamp', oldestKept);
   if (error) return json({ success: false, error: dbMsg(error) });
+  await writeAuditLog(admin.username, 'Trim logs', '', `deleted=${count || 0}, keepLast=${keepLast}`);
   return json({ success: true, deleted: count || 0, kept: keepLast });
 }
 
@@ -676,6 +703,16 @@ export async function admingetsettings(params: Record<string, unknown>) {
   return json({ success: true, settings });
 }
 
+const SYSTEM_SETTING = /^(private_|secret_)/i;
+const MAX_SETTING_VALUE = 5000;
+
+/** Settings are stored as text; coerce safely and cap the size. Returns null when invalid. */
+function settingText(v: unknown): string | null {
+  if (v === undefined) return null;
+  const s = typeof v === 'string' ? v : (typeof v === 'number' || typeof v === 'boolean') ? String(v) : JSON.stringify(v);
+  return typeof s === 'string' && s.length <= MAX_SETTING_VALUE ? s : null;
+}
+
 export async function adminupdatesettings(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'settings_manage');
   if (!admin.ok) return json(admin.error);
@@ -683,11 +720,14 @@ export async function adminupdatesettings(params: Record<string, unknown>) {
   // FIX BUG-14: value is required.
   if (!key) return json({ success: false, error: 'Setting key required.' });
   if (key.length > 100) return json({ success: false, error: 'Setting key is too long.' });
+  if (SYSTEM_SETTING.test(key)) return json({ success: false, error: 'This setting is managed by the system.' });
   if (params.value === undefined) return json({ success: false, error: 'value is required.' });
-  const value = params.value;
-  const { data: existing } = await supabase.from('settings').select('key').eq('key', key).limit(1);
-  if (existing && existing[0]) { const { error } = await supabase.from('settings').update({ value }).eq('key', key); if (error) return json({ success: false, error: dbMsg(error) }); }
-  else { const { error } = await supabase.from('settings').insert({ key, value }); if (error) return json({ success: false, error: dbMsg(error) }); }
+  const value = settingText(params.value);
+  if (value === null) return json({ success: false, error: `Value is invalid or longer than ${MAX_SETTING_VALUE} characters.` });
+  const { error } = await supabase.from('settings').upsert({ key, value }, { onConflict: 'key' });
+  if (error) return json({ success: false, error: dbMsg(error) });
+  // Payment QR / amount / instructions are fraud-sensitive: always leave a trail.
+  await writeAuditLog(admin.username, 'Update setting', key, value.slice(0, 300));
   return json({ success: true, key, value });
 }
 
@@ -698,18 +738,20 @@ export async function adminupdatesettingsbatch(params: Record<string, unknown>) 
   try { incoming = Array.isArray(params.settings) ? params.settings : JSON.parse(String(params.settings || '[]')); } catch { return json({ success: false, error: 'settings array required.' }); }
   if (!Array.isArray(incoming) || !incoming.length) return json({ success: false, error: 'settings array required.' });
   if (incoming.length > 200) return json({ success: false, error: 'Too many settings in one batch.' });
-  const { data: allRows } = await supabase.from('settings').select('key');
-  const existingKeys = new Set<string>((allRows || []).map(r => String(r.key)));
-  const applied: string[] = [];
+  const rows = new Map<string, string>();
   for (const s of incoming) {
-    const key = String((s && (s as any).key) || '').trim(); if (!key || key.length > 100) continue;
-    // FIX BUG-14: skip entries without a value.
-    if ((s as any).value === undefined) continue;
-    const value = (s as any).value;
-    if (existingKeys.has(key)) await supabase.from('settings').update({ value }).eq('key', key);
-    else { await supabase.from('settings').insert({ key, value }); existingKeys.add(key); }
-    applied.push(key);
+    const key = String((s && (s as any).key) || '').trim();
+    if (!key || key.length > 100 || SYSTEM_SETTING.test(key)) continue;
+    // FIX BUG-14: skip entries without a (valid) value.
+    const value = settingText((s as any)?.value);
+    if (value === null) continue;
+    rows.set(key, value);
   }
+  if (!rows.size) return json({ success: true, updated: [] });
+  const { error } = await supabase.from('settings').upsert([...rows].map(([key, value]) => ({ key, value })), { onConflict: 'key' });
+  if (error) return json({ success: false, error: dbMsg(error) });
+  const applied = [...rows.keys()];
+  await writeAuditLog(admin.username, 'Update settings (batch)', applied.slice(0, 30).join(','), `count=${applied.length}`);
   return json({ success: true, updated: applied });
 }
 
@@ -1019,11 +1061,13 @@ export async function adminimportprogress(params: Record<string, unknown>) {
     if (!userRow || !userRow[0]) { errors.push({ username: item.username, error: 'User account does not exist.' }); skippedCount++; continue; }
     const { data: existing } = await supabase.from('progress').select('*').eq('username', item.username).limit(1);
     const hasExisting = existing && existing[0];
-    if (mode === 'replace' && hasExisting) await supabase.from('progress_backups').insert({ backup_id: crypto.randomUUID(), import_id: importId, username: item.username, data: String(existing[0].data || ''), created_at: new Date().toISOString(), created_by: admin.username });
+    // Back up before BOTH destructive modes (merge rewrites the stored value too).
+    if ((mode === 'replace' || mode === 'merge') && hasExisting) await supabase.from('progress_backups').insert({ backup_id: crypto.randomUUID(), import_id: importId, username: item.username, data: String(existing[0].data || ''), created_at: new Date().toISOString(), created_by: admin.username });
 
     let finalData = item.data;
     if (mode === 'merge' && hasExisting) {
-      let existingObj: any = {}; try { existingObj = JSON.parse(String(existing[0].data || '{}')); } catch { /* ignore */ }
+      // readProgress understands gz1: compressed rows; JSON.parse alone would yield {} and wipe them.
+      const existingObj: any = await readProgress(existing[0].data);
       let newObj: any = {}; try { newObj = JSON.parse(item.data); } catch { /* ignore */ }
       const merged = { ...existingObj, ...newObj };
       const exSess = Array.isArray(existingObj?.prog?.sessions) ? existingObj.prog.sessions : [];
@@ -1047,6 +1091,7 @@ export async function adminimportprogress(params: Record<string, unknown>) {
   // FIX BUG-18: log status update failure (non-fatal but visible).
   const { error: updErr } = await supabase.from('progress_imports').update({ status, records_accepted: appliedCount, records_skipped: skippedCount, error_count: errors.length, completed_at: new Date().toISOString(), details: JSON.stringify(errors).slice(0, 30000) }).eq('import_id', importId);
   if (updErr) console.error('[adminimportprogress] status update failed:', updErr);
+  await writeAuditLog(admin.username, `Import progress (${mode})`, importId, `applied=${appliedCount}, skipped=${skippedCount}`);
   return json({ success: true, importId, mode, preview: false, recordsAccepted: appliedCount, recordsSkipped: skippedCount, errors });
 }
 

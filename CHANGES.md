@@ -1,4 +1,22 @@
-# Changes (v1.63 Supabase · v1.45 Apps Script)
+# Changes (v1.64 Supabase · v1.45 Apps Script)
+
+## 14 November 2026 — integrity and access hardening
+- Fail-closed trial access, rejected-session enforcement, reserved-name checks and
+  rate-limited password/upload/report actions.
+- PostgREST paging via `selectAll()`; batch filters are chunked so the 1000-row cap
+  no longer silently truncates admin lists, standings or correction exports.
+- Exact Storage lookup for content files, published-only study docs, weekly sets
+  withheld before release and answers/explanations removed during the exam window.
+- Verified PDF uploads, one upload per submission, validated weekly/subjective JSON.
+- Correction events are read after the watermark in ascending order, and batch edits
+  write the event first and roll it back when the file save fails.
+- Integrity migration `20261115000000_integrity_hardening.sql`: lookup/unique indexes,
+  storage size limits, atomic `rl_hit()` and service-role-only housekeeping calls.
+- CI gains the dependency-free Edge Function unit tests and an advisory `deno check`;
+  scheduled backend-sync failures open one issue instead of failing silently.
+- Apps Script: authenticated hard-question stats, gzip progress parsing, weekly answer
+  hiding, fixed reset URL, hidden `adminEmail`, POST-only correction sync and an
+  optional `LEGACY_API=off` rollout switch.
 
 ## 14 November 2026 — reports, corrections, Student 360
 - `question_reports.qid` and `correction_events` migration (idempotent).

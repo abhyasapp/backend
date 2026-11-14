@@ -2,7 +2,10 @@ import { supabase } from '../_shared/db.ts';
 import { recordDeletion } from '../_shared/tombstones.ts';
 import { json, dbMsg, escLike } from '../_shared/http.ts';
 import { authUser, issueUserToken } from '../_shared/auth.ts';
-import { verifyPassword, makeStoredHash } from '../_shared/crypto.ts';
+import { verifyPassword, makeStoredHash, safeEqual } from '../_shared/crypto.ts';
+import { passwordProblem } from '../_shared/owner.ts';
+import { rlBlocked, rlHit, rlClear, RL_WINDOW_MS, RL_TOO_MANY } from '../_shared/rate-limit.ts';
+import { REQUIRE_BASE_REVISION } from '../_shared/config.ts';
 import { archivePreviousProgress, sameRevision, isAcceptableProgressData, isStoragePath } from '../_shared/utils.ts';
 
 export async function saveprogress(params: Record<string, unknown>) {
@@ -16,6 +19,10 @@ export async function saveprogress(params: Record<string, unknown>) {
 
   const { data: existing } = await supabase.from('progress').select('*').eq('username', auth.username).limit(1);
   const row = existing && existing[0] ? existing[0] as Record<string, unknown> : null;
+  if (row && !checkRevision && REQUIRE_BASE_REVISION) {
+    // Refuse blind overwrites: the client must send the revision it last saw.
+    return json({ success: false, conflict: true, data: row.data, updatedAt: row.updated_at });
+  }
   if (row && checkRevision && !sameRevision(params.baseUpdatedAt, row.updated_at)) {
     return json({ success: false, conflict: true, data: row.data, updatedAt: row.updated_at });
   }
@@ -125,20 +132,26 @@ export async function changepassword(params: Record<string, unknown>) {
   const currentPassword = String(params.currentPassword || '');
   const newPassword = String(params.newPassword || '');
   if (!currentPassword) return json({ success: false, error: 'Enter your current password.' });
-  if (!newPassword || newPassword.length < 8) return json({ success: false, error: 'New password must be at least 8 characters.' });
-  if (newPassword.length > 256) return json({ success: false, error: 'Password is too long.' });
-  if (newPassword === currentPassword) return json({ success: false, error: 'New password must be different from the current one.' });
+  const problem = passwordProblem(newPassword, auth.username, currentPassword);
+  if (problem) return json({ success: false, error: problem });
 
-  const v = await verifyPassword(currentPassword, String(auth.user.pass_hash || ''));
-  if (!v.ok) return json({ success: false, error: 'Current password is incorrect.' });
+  // A stolen session token must not allow unlimited guessing of the current password.
+  const rlKey = 'chpw:' + auth.username.toLowerCase();
+  if (await rlBlocked(rlKey, 5)) return json(RL_TOO_MANY);
+  const oldHash = String(auth.user.pass_hash || '');
+  const v = await verifyPassword(currentPassword, oldHash);
+  if (!v.ok) { await rlHit(rlKey, RL_WINDOW_MS); return json({ success: false, error: 'Current password is incorrect.' }); }
+  await rlClear(rlKey);
 
   const newHash = await makeStoredHash(newPassword);
   const { error } = await supabase.from('users').update({ pass_hash: newHash, session_token: '', session_token_expires_at: '' }).eq('username', auth.username);
   if (error) return json({ success: false, error: dbMsg(error) });
 
   // Keep the matching admin row in sync so adminswitchfromuser still works.
-  const { data: adminRow } = await supabase.from('admins').select('username').eq('username', auth.username).limit(1);
-  if (adminRow && adminRow[0]) {
+  // Only when the admin row is still LINKED (identical hash). If the owner reset the admin
+  // password it is deliberately detached, and a student password change must not overwrite it.
+  const { data: adminRow } = await supabase.from('admins').select('username,pass_hash').eq('username', auth.username).limit(1);
+  if (adminRow && adminRow[0] && safeEqual(String(adminRow[0].pass_hash || ''), oldHash)) {
     await supabase.from('admins').update({ pass_hash: newHash, token: '', token_expires: '' }).eq('username', auth.username);
   }
 
@@ -161,10 +174,18 @@ export async function deletemyaccount(params: Record<string, unknown>) {
   const auth = await authUser(params);
   if (!auth.ok) return json(auth.error);
   if (String(params.confirm || '').trim().toUpperCase() !== 'DELETE') return json({ success: false, error: 'Type DELETE to confirm.' });
-  const password = String(params.password || '');
-  if (!password) return json({ success: false, needsPassword: true, error: 'Enter your password to delete your account.' });
-  const v = await verifyPassword(password, String(auth.user.pass_hash || ''));
-  if (!v.ok) return json({ success: false, error: 'Password is incorrect.' });
+  // Google-only accounts have a locked (unusable) hash and no password to confirm with;
+  // they confirm by typing DELETE. App stores require in-app deletion for every account.
+  const googleOnly = String(auth.user.pass_hash || '').startsWith('locked:');
+  if (!googleOnly) {
+    const password = String(params.password || '');
+    if (!password) return json({ success: false, needsPassword: true, error: 'Enter your password to delete your account.' });
+    const rlKey = 'delacct:' + auth.username.toLowerCase();
+    if (await rlBlocked(rlKey, 5)) return json(RL_TOO_MANY);
+    const v = await verifyPassword(password, String(auth.user.pass_hash || ''));
+    if (!v.ok) { await rlHit(rlKey, RL_WINDOW_MS); return json({ success: false, error: 'Password is incorrect.' }); }
+    await rlClear(rlKey);
+  }
 
   const { data: adminRow } = await supabase.from('admins').select('username').eq('username', auth.username).limit(1);
   if (adminRow && adminRow[0]) return json({ success: false, error: 'This account also has admin access. Ask the main admin to remove the admin role first.' });

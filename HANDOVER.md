@@ -24,6 +24,21 @@
   on every run.
 - The qid migration has been applied to the linked Supabase project and the API
   function has been deployed as version 39.
+- A second hardening pass adds fail-closed access, paged PostgREST reads,
+  exact Storage lookup, weekly answer hiding, atomic rate limiting and the
+  `20261115000000_integrity_hardening.sql` migration. The API version is now
+  **1.64**; apply the new migration and redeploy the function when approved.
+
+## Deploy the hardening pass
+
+1. Review the pre-deploy queries in the supplied handover
+   (`C:\\Users\\MANOJUPD\\Downloads\\abhyas-handover`).
+2. Apply `20261115000000_integrity_hardening.sql`.
+3. Deploy the `api` Edge Function.
+4. Run the smoke checks; then set `WEEKLY_HIDE_ANSWERS=false` only if a client
+   still needs answers during an open weekly window.
+5. Do not set `REQUIRE_BASE_REVISION=true` until every client sends
+   `baseUpdatedAt`.
 
 ## Verify
 

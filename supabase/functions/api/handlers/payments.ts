@@ -1,5 +1,6 @@
 import { supabase } from '../_shared/db.ts';
-import { json, dbMsg } from '../_shared/http.ts';
+import { json, dbMsg, escLike } from '../_shared/http.ts';
+import { writeAuditLog } from '../_shared/owner.ts';
 import { authUser, authAdmin, computeAccess } from '../_shared/auth.ts';
 import { base64ToBytes, detectImageType, randId } from '../_shared/crypto.ts';
 import { ownedUploadPath } from '../_shared/utils.ts';
@@ -43,18 +44,18 @@ export async function submitpayment(params: Record<string, unknown>) {
     if (comma < 0) return json({ success: false, error: 'Invalid screenshot data.' });
     const bytes = base64ToBytes(legacyData.slice(comma + 1));
     const type = detectImageType(bytes);
-    if (type) {
-      const path = `${username}/${Date.now()}-${randId()}.${type.ext}`;
-      const { error: upErr } = await supabase.storage
-        .from('payments').upload(path, bytes, { contentType: type.mime, upsert: false });
-      if (upErr) return json({ success: false, error: 'Screenshot upload failed. ' + dbMsg(upErr) });
-      screenshotStored = path;
-    }
+    if (!type) return json({ success: false, error: 'Unsupported screenshot format. Use PNG, JPG, WEBP, GIF or HEIC.' });
+    const path = `${username}/${Date.now()}-${randId()}.${type.ext}`;
+    const { error: upErr } = await supabase.storage
+      .from('payments').upload(path, bytes, { contentType: type.mime, upsert: false });
+    if (upErr) return json({ success: false, error: 'Screenshot upload failed. ' + dbMsg(upErr) });
+    screenshotStored = path;
   } else if (legacyData.length <= 500 && /^https:\/\/(drive|docs)\.google\.com\//.test(legacyData)) {
     screenshotStored = legacyData;
   }
 
-  const { data: dupRows } = await supabase.from('payments').select('*').eq('tx_id', txId);
+  // Case-insensitive, matching how the admin console detects duplicate transaction IDs.
+  const { data: dupRows } = await supabase.from('payments').select('*').ilike('tx_id', escLike(txId));
   const dup = (dupRows || []).find(r =>
     String(r.username || '').toLowerCase() !== username.toLowerCase() &&
     String(r.status || '').toLowerCase() !== 'rejected'
@@ -131,5 +132,6 @@ export async function adminreviewpayment(params: Record<string, unknown>) {
       status: 'payment_pending', payment_status: 'pending', permanent_access: 'false',
     }).eq('username', username);
   }
+  await writeAuditLog(admin.username, 'Review payment: ' + status, username, reason);
   return json({ success: true, username, status });
 }

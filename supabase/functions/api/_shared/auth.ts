@@ -3,24 +3,9 @@ import { tokenHash, tokenMatches } from './crypto.ts';
 import { USER_TOKEN_TTL_MS, ADMIN_TOKEN_TTL_MS } from './config.ts';
 import { escLike } from './http.ts';
 
-export function computeAccess(user: Record<string, unknown>) {
-  const status = String(user.status || 'trial');
-  const permanent = user.permanent_access === true || String(user.permanent_access) === 'true';
-  const accessType = String(user.access_type || '');
-  const expiresAt = user.access_expires_at ? new Date(String(user.access_expires_at)) : null;
-  const now = new Date();
-  if (permanent || status === 'active') {
-    if (accessType === 'yearly' && expiresAt && !isNaN(expiresAt.getTime()) && now > expiresAt) return { level: 'expired' };
-    return { level: 'permanent', accessType: accessType || 'permanent', accessExpiresAt: user.access_expires_at || '' };
-  }
-  if (status === 'trial') {
-    const t = user.trial_expires_at ? new Date(String(user.trial_expires_at)) : null;
-    if (!t || isNaN(t.getTime()) || now <= t) return { level: 'trial', trialExpiresAt: user.trial_expires_at || '' };
-    return { level: 'expired' };
-  }
-  if (status === 'payment_pending') return { level: 'pending_review' };
-  return { level: 'expired' };
-}
+// computeAccess lives in pure.ts (dependency-free, unit-tested). Re-exported for handlers.
+export { computeAccess } from './pure.ts';
+import { computeAccess } from './pure.ts';
 
 export function publicUser(u: Record<string, unknown>) {
   return {
@@ -55,6 +40,8 @@ export async function authUser(params: Record<string, unknown>) {
   const { data } = await supabase.from('users').select('*').eq('username', username).limit(1);
   const user = data && data[0] ? data[0] : null;
   if (!user) return { ok: false as const, error: errResp };
+  // A rejected account may not keep using a session that was issued before it was rejected.
+  if (String(user.status || '') === 'rejected') return { ok: false as const, error: errResp };
 
   const token = String(params.token || '');
   if (!token || !(await tokenMatches(String(user.session_token || ''), token))) return { ok: false as const, error: errResp };

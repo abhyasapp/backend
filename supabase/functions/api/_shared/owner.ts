@@ -50,10 +50,11 @@ export function generateTempPassword(): string {
 
 export async function writeAuditLog(adminName: string, action: string, target: string, details = ''): Promise<void> {
   try {
-    await supabase.from('logs').insert({
+    const { error } = await supabase.from('logs').insert({
       timestamp: new Date().toISOString(),
       admin: adminName, action, target, details: String(details).slice(0, 2000),
     });
+    if (error) console.error('[audit] log insert failed:', action, error.message);
   } catch { /* non-fatal */ }
 }
 

@@ -3,7 +3,13 @@ import { recordDeletion } from '../_shared/tombstones.ts';
 import { json, dbMsg } from '../_shared/http.ts';
 import { authUser, authAdmin, requireAccess } from '../_shared/auth.ts';
 import { randId, base64ToBytes, isPdfBytes } from '../_shared/crypto.ts';
-import { isStoragePath, ownedUploadPath } from '../_shared/utils.ts';   // FIX MINOR-04: import isStoragePath
+import { isStoragePath, ownedUploadPath, safeStoragePath, statObject, looksLikePdf } from '../_shared/utils.ts';
+import { rlBlocked, rlHit, RL_WINDOW_MS, RL_TOO_MANY } from '../_shared/rate-limit.ts';
+
+// `score` is empty until graded (the column is TEXT NOT NULL DEFAULT ''): never read '' as 0.
+const scoreOf = (r: Record<string, unknown>): number | null =>
+  r.score === null || r.score === undefined || String(r.score).trim() === '' ? null : Number(r.score);
+const MAX_PDF_BYTES = 10 * 1024 * 1024;
 
 async function signedPdfUrl(bucket: string, pathOrUrl: string): Promise<string> {
   if (!pathOrUrl) return '';
@@ -19,14 +25,21 @@ export async function adminlistsubjectivesubmissions(params: Record<string, unkn
   const status = String(params.status || '').trim();
   const chapterId = String(params.chapterId || '').trim();
   const kind = String(params.kind || '').trim();
-  const from = params.dateFrom ? new Date(String(params.dateFrom) + 'T00:00:00').getTime() : null;
-  const to = params.dateTo ? new Date(String(params.dateTo) + 'T23:59:59.999').getTime() : null;
+  // Day boundaries in Asia/Kathmandu (UTC+05:45); the Edge runtime itself runs in UTC.
+  const fromRaw = params.dateFrom ? Date.parse(String(params.dateFrom) + 'T00:00:00+05:45') : NaN;
+  const toRaw = params.dateTo ? Date.parse(String(params.dateTo) + 'T23:59:59.999+05:45') : NaN;
+  const from = isFinite(fromRaw) ? fromRaw : null;
+  const to = isFinite(toRaw) ? toRaw : null;
   const limit = Math.min(Number(params.limit) || 500, 500);
 
   let q = supabase.from('subjective_submissions').select('*');
   if (status) q = q.eq('status', status);
   if (chapterId) q = q.eq('chapter_id', chapterId);
   if (kind) q = q.eq('kind', kind);
+  // submitted_at is epoch-ms text (equal length), so text comparison orders correctly. Filter in SQL so the
+  // 500-row limit applies to the requested range, not to the newest rows overall.
+  if (from !== null) q = q.gte('submitted_at', String(from));
+  if (to !== null) q = q.lte('submitted_at', String(to));
   q = q.order('submitted_at', { ascending: false }).limit(limit);
 
   const { data, error } = await q;
@@ -42,7 +55,7 @@ export async function adminlistsubjectivesubmissions(params: Record<string, unkn
       id: r.id, username: r.username, kind: r.kind, questionId: r.question_id, questionText: r.question_text,
       questionMarks: Number(r.question_marks || 0), chapterId: r.chapter_id, solveSec: Number(r.solve_sec || 0),
       startedAt: Number(r.started_at || 0), submittedAt: Number(r.submitted_at || 0), pdfUrl: r.pdf_url || '',
-      status: r.status, score: r.score === null || r.score === undefined ? null : Number(r.score),
+      status: r.status, score: scoreOf(r),
       feedback: r.feedback || '', gradedBy: r.graded_by || '', gradedAt: r.graded_at || '',
       pdfReplacedAt: r.pdf_replaced_at || '', pdfReplacedBy: r.pdf_replaced_by || '', pdfOriginalBackupId: r.pdf_original_backup_id || '',
     })),
@@ -102,7 +115,9 @@ export async function adminreplacesubmissionpdf(params: Record<string, unknown>)
     const { error: upErr } = await supabase.storage.from('subjective').upload(newPath, bytes, { contentType: 'application/pdf', upsert: true });
     if (upErr) return json({ success: false, error: 'PDF upload failed. ' + dbMsg(upErr) });
   }
-  if (!isStoragePath(newPath)) return json({ success: false, error: 'Invalid new PDF path.' });
+  if (!isStoragePath(newPath) || !safeStoragePath(newPath)) return json({ success: false, error: 'Invalid new PDF path.' });
+  if (!(await statObject('subjective', newPath))) return json({ success: false, error: 'New PDF not found in storage.' });
+  if (params.newPdfPath && !(await looksLikePdf('subjective', newPath))) return json({ success: false, error: "That file isn't a valid PDF." });
 
   let backupId = String(data[0].pdf_original_backup_id || '').trim();
   if (!backupId) {
@@ -123,6 +138,9 @@ export async function adminreplacesubmissionpdf(params: Record<string, unknown>)
   const now = new Date().toISOString();
   const { error: updErr } = await supabase.from('subjective_submissions').update({ pdf_file_id: newPath, pdf_replaced_at: now, pdf_replaced_by: admin.username, pdf_original_backup_id: backupId }).eq('id', id);
   if (updErr) return json({ success: false, error: dbMsg(updErr) });
+  // The superseded file would otherwise stay in storage forever (and survive account deletion).
+  // Only remove it when the original is safely held in the backup bucket.
+  if (backupId && currentPath !== newPath) await supabase.storage.from('subjective').remove([currentPath]);
   return json({ success: true, id, newPath, backupId, replacedAt: now });
 }
 
@@ -131,6 +149,9 @@ export async function getsubjectiveuploadurl(params: Record<string, unknown>) {
   if (!auth.ok) return json(auth.error);
   const gate = requireAccess(auth);
   if (gate) return json(gate);
+  const rlKey = 'subjup:' + auth.username.toLowerCase();
+  if (await rlBlocked(rlKey, 20)) return json(RL_TOO_MANY);
+  await rlHit(rlKey, RL_WINDOW_MS);
   const path = `${auth.username}/${Date.now()}-${randId()}.pdf`;
   const { data, error } = await supabase.storage.from('subjective').createSignedUploadUrl(path);
   if (error || !data) return json({ success: false, error: (error ? dbMsg(error) : 'could not create upload url') });
@@ -160,8 +181,20 @@ export async function submitsubjectiveanswer(params: Record<string, unknown>) {
 
   if (providedPath) {
     if (!ownedUploadPath(providedPath, username, ['pdf'])) return json({ success: false, error: 'Invalid PDF path.' });
-    const { data: exists } = await supabase.storage.from('subjective').list(username, { search: providedPath.split('/').pop() });
-    if (!exists || !exists.length) return json({ success: false, error: 'PDF upload not found.' });
+    const stat = await statObject('subjective', providedPath);
+    if (!stat) return json({ success: false, error: 'PDF upload not found.' });
+    // A signed-upload path is not validated by the upload itself: check size and %PDF- signature here.
+    if (stat.size > MAX_PDF_BYTES) {
+      await supabase.storage.from('subjective').remove([providedPath]);
+      return json({ success: false, error: 'PDF too large — max ~10 MB.' });
+    }
+    if (!(await looksLikePdf('subjective', providedPath))) {
+      await supabase.storage.from('subjective').remove([providedPath]);
+      return json({ success: false, error: "That file isn't a valid PDF." });
+    }
+    // One upload = one submission (re-using a path let a later cleanup delete an earlier submission's PDF).
+    const { data: used } = await supabase.from('subjective_submissions').select('id').eq('pdf_file_id', providedPath).limit(1);
+    if (used && used[0]) return json({ success: false, error: 'That upload was already submitted.' });
     pdfPath = providedPath;
   } else if (legacyData.startsWith('data:')) {
     if (legacyData.length > 14 * 1024 * 1024) return json({ success: false, error: 'PDF too large — max ~10 MB.' });
@@ -188,7 +221,7 @@ export async function submitsubjectiveanswer(params: Record<string, unknown>) {
   const { error } = await supabase.from('subjective_submissions').insert({
     id, username, kind, question_id: questionId, question_text: questionText, question_marks: questionMarks,
     chapter_id: chapterId, solve_sec: solveSec, started_at: startedAt, submitted_at: now, pdf_file_id: pdfPath,
-    pdf_url: '', status: 'pending', score: null, feedback: '', graded_by: '', graded_at: '',
+    pdf_url: '', status: 'pending', feedback: '', graded_by: '', graded_at: '',
     pdf_replaced_at: '', pdf_replaced_by: '', pdf_original_backup_id: '',
   });
   if (error) return json({ success: false, error: dbMsg(error) });
@@ -205,7 +238,7 @@ export async function getmysubjectivesubmissions(params: Record<string, unknown>
     id: r.id, username: r.username, kind: r.kind, questionId: r.question_id, questionText: r.question_text,
     questionMarks: Number(r.question_marks || 0), chapterId: r.chapter_id, solveSec: Number(r.solve_sec || 0),
     startedAt: Number(r.started_at || 0), submittedAt: Number(r.submitted_at || 0), pdfUrl: r.pdf_url || '',
-    status: r.status, score: r.score === null || r.score === undefined ? null : Number(r.score),
+    status: r.status, score: scoreOf(r),
     feedback: r.feedback || '', gradedBy: r.graded_by || '', gradedAt: r.graded_at || '',
   }));
   return json({ success: true, submissions });
@@ -276,8 +309,11 @@ export async function adminaddstudydoc(params: Record<string, unknown>) {
     const { error: upErr } = await supabase.storage.from('study-docs').upload(filePath, bytes, { contentType: 'application/pdf', upsert: false });
     if (upErr) return json({ success: false, error: 'PDF upload failed. ' + dbMsg(upErr) });
   } else {
-    const { data: exists } = await supabase.storage.from('study-docs').list('uploads', { search: filePath.split('/').pop() });
-    if (!exists || !exists.length) return json({ success: false, error: 'PDF upload not found.' });
+    if (!filePath.startsWith('uploads/') || !safeStoragePath(filePath)) return json({ success: false, error: 'Invalid PDF path.' });
+    const stat = await statObject('study-docs', filePath);
+    if (!stat) return json({ success: false, error: 'PDF upload not found.' });
+    if (!(await looksLikePdf('study-docs', filePath))) return json({ success: false, error: "That file isn't a valid PDF." });
+    sizeBytes = stat.size;
   }
 
   const id = crypto.randomUUID();
