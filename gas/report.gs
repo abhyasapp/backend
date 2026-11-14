@@ -563,6 +563,20 @@ function adminUpdateQuestion(p) {
     const editUid = "corr_" + Utilities.getUuid();
     const editAt = new Date().toISOString();
 
+    /* The snapshot written into every matching report row. Without this the
+       loop below throws a ReferenceError inside a try/catch, so the sheet
+       silently never receives the before/after pair the console reads. */
+    const correctedJson = JSON.stringify({
+      uid: editUid, at: editAt,
+      before: beforeEdit,
+      after: {
+        question: newQ, options: options,
+        correctIndex: correct, explanation: explanation
+      },
+      /* Legacy top-level shape, still read by adminListCorrections. */
+      q: newQ, options: options, correct: correct, explanation: explanation
+    });
+
     /* One explicit full-file copy per day. Drive also keeps every previous
        version, but a separate copy is easier to find if something goes badly
        wrong. Making one on every save was the slow part. */

@@ -83,6 +83,9 @@ const MIN_ADMIN_PASSWORD_LENGTH        = 8;
 const MIN_USER_PASSWORD_LENGTH         = 8;
 const PRIVATE_SETTING_PREFIXES         = ["private_", "secret_"];
 const RESERVED_USERNAMES               = ["admin", "administrator", "root", "owner", "system", "support", "abhyas"];
+/* Reset links must not depend on an admin-editable setting: a settings_manage
+   admin could otherwise point the token at their own domain. */
+const RESET_APP_URL                    = "https://app.mku.name.np/";
 
 const USERS_SHEET            = "Users";
 const PAYMENTS_SHEET         = "Payments";
@@ -145,6 +148,7 @@ const STUDYDOC_CATEGORIES = ["model-answer","notes","past-paper","syllabus","oth
 const MAX_STUDYDOC_DATA_CHARS = 14 * 1024 * 1024;
 const WEEKLYSTART_HEADERS = ["username","weeklyId","startedAt"];
 const WEEKLY_EXAM_WINDOW_MS = 12 * 60 * 60 * 1000;
+const WEEKLY_ANSWER_HIDE_MS = WEEKLY_EXAM_WINDOW_MS + 3 * 60 * 60 * 1000;
 const PROGRESS_IMPORT_HEADERS = [
   "importId","admin","mode","status","recordsReceived",
   "recordsAccepted","recordsSkipped","errorCount","createdAt",
@@ -271,7 +275,7 @@ const POST_ONLY_ACTIONS = {
   login: 1, googlelogin: 1, signup: 1, resetpassword: 1,
   adminlogin: 1, adminchangepassword: 1, admincreateadmin: 1,
   deletemyaccount: 1, resetmyprogress: 1,
-  syncpull: 1, syncpush: 1
+  syncpull: 1, syncpush: 1, synccorrectionssince: 1
 };
 
 const _sheetRefCache = {};
@@ -711,6 +715,18 @@ function doGet(e) {
 
   const action = String(e.parameter.action || "").trim().toLowerCase();
 
+  /* Optional rollout switch. Set Script Property LEGACY_API=off once every
+     client uses Supabase; the small allow-list keeps health, email and sync
+     endpoints available for the fallback path. */
+  const LEGACY_ALLOWED_ = {
+    ping: 1, health: 1, verifyemail: 1, resendverification: 1,
+    requestpasswordreset: 1, resetpassword: 1,
+    syncpull: 1, syncpush: 1, synccorrectionssince: 1
+  };
+  if (PropertiesService.getScriptProperties().getProperty("LEGACY_API") === "off" && !LEGACY_ALLOWED_[action]) {
+    return jsonResponse({ success: false, error: "This endpoint has moved." });
+  }
+
   if (action === "verifyemail") return handleVerifyEmail_(e.parameter);
 
   if (REQUIRE_POST_FOR_CREDENTIALS && !_REQUEST_VIA_POST &&
@@ -766,7 +782,14 @@ function doGet(e) {
       case "getpaymentstatus":     result = getPaymentStatus(e.parameter); break;
 
       case "getpublicinfo":        result = getPublicInfo(); break;
-      case "gethardquestions":     result = { success: true, map: getHardQuestionsCache_() }; break;
+      case "gethardquestions": {
+        const a = authUser_(e.parameter);
+        if (!a.ok) { result = a.error; break; }
+        const g = requireAccess_(a);
+        if (g) { result = g; break; }
+        result = { success: true, map: getHardQuestionsCache_() };
+        break;
+      }
       case "getsettings":          result = getSettings(); break;
       case "getfile":              result = handleGetFile(e.parameter); break;
       case "getfiles":             result = handleGetFiles(e.parameter); break;
@@ -1112,8 +1135,8 @@ function userHasContentAccess_(row) {
   }
   if (status === "trial") {
     const t = row[11] ? new Date(row[11]) : null;
-    if (!t || isNaN(t)) return true;
-    return now <= t;
+    /* Fail closed: a trial with no valid expiry is expired, not free forever. */
+    return !!t && !isNaN(t) && now <= t;
   }
   return false;
 }
@@ -2054,7 +2077,7 @@ function requestPasswordReset(p) {
     MailApp.sendEmail({
       to: email,
       subject: "Reset your Abhyas password",
-      body: `Hi ${found.row[2] || username},\n\nSomeone (hopefully you) requested a password reset for your Abhyas account (${username}).\n\nOpen this link on your phone to choose a new password:\n\n${getSettingValue_("appUrl", "https://app.mku.name.np/")}#resetToken=${token}\n\nOr paste this code into the app: ${token}\n\nThis code expires in 1 hour. If you didn't request this, you can safely ignore this email.\n`
+      body: `Hi ${found.row[2] || username},\n\nSomeone (hopefully you) requested a password reset for your Abhyas account (${username}).\n\nOpen this link on your phone to choose a new password:\n\n${RESET_APP_URL}#resetToken=${token}\n\nOr paste this code into the app: ${token}\n\nThis code expires in 1 hour. If you didn't request this, you can safely ignore this email.\n`
     });
   } catch (err) { console.error("requestPasswordReset: MailApp send failed:", err); }
   return generic;
@@ -3422,11 +3445,54 @@ function isContentFileAllowed_(fileId, isAdmin) {
   return false;
 }
 
+const _ANSWER_KEYS = ["correct", "correctIndex", "answer", "ans", "Answer", "explanation", "exp"];
+
+function _stripQuestion_(q) {
+  if (!q || typeof q !== "object" || Array.isArray(q)) return q;
+  const o = Object.assign({}, q);
+  _ANSWER_KEYS.forEach(function (k) { delete o[k]; });
+  ["options", "opts"].forEach(function (k) {
+    if (Array.isArray(o[k])) o[k] = o[k].map(function (opt) {
+      if (!opt || typeof opt !== "object" || Array.isArray(opt)) return opt;
+      const c = Object.assign({}, opt);
+      delete c.correct; delete c.isCorrect;
+      return c;
+    });
+  });
+  return o;
+}
+
+function stripAnswers_(raw) {
+  if (Array.isArray(raw)) return raw.map(_stripQuestion_);
+  if (!raw || typeof raw !== "object") return raw;
+  const o = Object.assign({}, raw);
+  ["questions", "data", "quiz", "items"].forEach(function (k) {
+    if (Array.isArray(o[k])) o[k] = o[k].map(_stripQuestion_);
+  });
+  if (Array.isArray(o.sections)) o.sections = o.sections.map(function (s) {
+    if (!s || typeof s !== "object") return s;
+    const sec = Object.assign({}, s);
+    if (Array.isArray(sec.questions)) sec.questions = sec.questions.map(_stripQuestion_);
+    return sec;
+  });
+  return o;
+}
+
+function _weeklyAnswersHidden_(fileId) {
+  const data = _cachedSheetData_(WEEKLYSETS_SHEET, getWeeklySetsSheet_).data;
+  const now = Date.now();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][2]) !== fileId) continue;
+    const rel = new Date(data[i][7]).getTime();
+    return !isNaN(rel) && now <= rel + WEEKLY_ANSWER_HIDE_MS;
+  }
+  return false;
+}
+
 function handleGetFile(p) {
   const fileId = String(p.fileId || "").trim();
   if (!fileId) return { success: false, error: "Missing fileId parameter." };
   if (fileId.length > 200 || !/^[A-Za-z0-9_-]+$/.test(fileId)) return { success: false, error: "Invalid fileId." };
-  if (!checkGetFileRateLimit_()) return { success: false, error: "Server is busy, please try again in a moment.", rateLimited: true };
 
   let isAdminCaller = false;
   if (GETFILE_REQUIRES_AUTH) {
@@ -3443,10 +3509,17 @@ function handleGetFile(p) {
       }
     }
   }
+  /* Count only authenticated/admin callers, so an anonymous flood cannot
+     consume the shared budget and lock every student out of content. */
+  if (!checkGetFileRateLimit_()) return { success: false, error: "Server is busy, please try again in a moment.", rateLimited: true };
   if (!isContentFileAllowed_(fileId, isAdminCaller)) {
     return { success: false, error: "That file is not available." };
   }
   const res = readJsonFileById_(fileId);
+  if (res.success && !isAdminCaller && _weeklyAnswersHidden_(fileId)) {
+    res.result = stripAnswers_(res.result);
+    res.answersHidden = true;
+  }
   if (res.success && res.result !== undefined) {
     try { res.content = JSON.stringify(res.result); } catch (e) {}
   }
@@ -3485,7 +3558,6 @@ function handleGetFiles(p) {
   for (let i = 0; i < ids.length; i++) {
     if (ids[i].length > 200 || !/^[A-Za-z0-9_-]+$/.test(ids[i])) return { success: false, error: "Invalid fileId." };
   }
-  if (!checkGetFileRateLimit_()) return { success: false, error: "Server is busy, please try again in a moment.", rateLimited: true };
 
   let isAdminCaller = false;
   if (GETFILE_REQUIRES_AUTH) {
@@ -3506,6 +3578,7 @@ function handleGetFiles(p) {
       }
     }
   }
+  if (!checkGetFileRateLimit_()) return { success: false, error: "Server is busy, please try again in a moment.", rateLimited: true };
 
   const files = {};
   const deferred = [];
@@ -3516,6 +3589,10 @@ function handleGetFiles(p) {
     const entry = isContentFileAllowed_(id, isAdminCaller)
       ? readJsonFileById_(id)
       : { success: false, error: "That file is not available." };
+    if (entry.success && !isAdminCaller && _weeklyAnswersHidden_(id)) {
+      entry.result = stripAnswers_(entry.result);
+      entry.answersHidden = true;
+    }
     if (entry.success && entry.result !== undefined) {
       try { entry.content = JSON.stringify(entry.result); } catch (e) {}
     }
@@ -3580,7 +3657,9 @@ function getSettings() {
 function getSettingsUncached_() {
   const all = getSettingsAll_();
   const settings = {};
-  Object.keys(all).forEach(function (k) { if (!_isPrivateSettingKey_(k)) settings[k] = all[k]; });
+  Object.keys(all).forEach(function (k) {
+    if (!_isPrivateSettingKey_(k) && k !== "adminEmail") settings[k] = all[k];
+  });
   return { success: true, settings: settings };
 }
 
@@ -4510,8 +4589,8 @@ function adminMostMissedQuestions(p) {
     const username = String(data[i][0] || "").trim();
     const raw = data[i][1];
     if (!username || !raw) continue;
-    let parsed;
-    try { parsed = JSON.parse(raw); } catch (e) { continue; }
+    const parsed = _readProgressJson_(raw);
+    if (!parsed) continue;
     const sessions = (parsed && parsed.prog && Array.isArray(parsed.prog.sessions)) ? parsed.prog.sessions : [];
     for (let si = 0; si < sessions.length; si++) {
       const session = sessions[si];
@@ -5425,15 +5504,31 @@ function getPublicInfo() {
   };
 }
 
+function _readProgressJson_(raw) {
+  const s = String(raw || "");
+  if (!s) return null;
+  try {
+    if (s.indexOf(PROGRESS_GZ_PREFIX) === 0) {
+      const blob = Utilities.newBlob(
+        Utilities.base64Decode(s.slice(PROGRESS_GZ_PREFIX.length)),
+        "application/x-gzip"
+      );
+      return JSON.parse(Utilities.ungzip(blob).getDataAsString("UTF-8"));
+    }
+    return JSON.parse(s);
+  } catch (e) { return null; }
+}
+
 function getHardQuestionsCache_() {
   const cache = CacheService.getScriptCache();
   const hit = cache.get("hard_questions");
   if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  if (!checkRateLimit_("hardq_build", 2, 10 * 60 * 1000)) return {};
   const data = _cachedSheetData_(PROGRESS_SHEET, getProgressSheet_).data;
   const tally = {};
   for (let i = 1; i < data.length; i++) {
-    let parsed;
-    try { parsed = JSON.parse(data[i][1]); } catch (e) { continue; }
+    const parsed = _readProgressJson_(data[i][1]);
+    if (!parsed) continue;
     const sessions = parsed && parsed.prog && Array.isArray(parsed.prog.sessions) ? parsed.prog.sessions : [];
     for (const s of sessions) {
       for (const qr of (s.qres || [])) {
