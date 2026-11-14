@@ -9,8 +9,7 @@ be transferred, but this captures the exact state and the first commands.
 - Frontend: `D:\CODERSCODE\abhyas-frontend\abhyas-frontend`
 - Drive -> Neon pipeline: `D:\CODERSCODE\DRIVETONEONTODRIVE`
 
-The backend worktree was already dirty before this work. Do **not** reset,
-checkout, pull or delete unrelated files.
+`main` is clean and pushed. The repository is private.
 
 ## Implemented in this pass
 
@@ -54,7 +53,10 @@ hops before falling back to the old text/identity matcher.
 - Apps Script fixes for gzip progress, authenticated hard-question stats,
   weekly answer hiding, reset URL, `adminEmail`, POST-only correction sync and
   the optional `LEGACY_API=off` switch.
-- API version is now **1.64**.
+- API version **1.64** is deployed live.
+- Migration `20261115000000_integrity_hardening.sql` is applied live.
+- Live checks: `action=health` returns 1.64; unique indexes exist; public
+  `getsettings` omits `adminEmail`; unauthenticated correction sync returns 401.
 
 ## Verification already run
 

@@ -22,23 +22,22 @@
 - `syncCorrectionsSince` emits qid-bearing corrections and now treats `since` as
   exclusive, so the pipeline watermark does not re-fetch the newest queued row
   on every run.
-- The qid migration has been applied to the linked Supabase project and the API
-  function has been deployed as version 39.
+- The qid migration has been applied to the linked Supabase project.
 - A second hardening pass adds fail-closed access, paged PostgREST reads,
   exact Storage lookup, weekly answer hiding, atomic rate limiting and the
-  `20261115000000_integrity_hardening.sql` migration. The API version is now
-  **1.64**; apply the new migration and redeploy the function when approved.
+  `20261115000000_integrity_hardening.sql` migration. It is applied live and
+  the API function is deployed as **1.64** (14 November 2026).
 
-## Deploy the hardening pass
+## Verify the live state
 
-1. Review the pre-deploy queries in the supplied handover
-   (`C:\\Users\\MANOJUPD\\Downloads\\abhyas-handover`).
-2. Apply `20261115000000_integrity_hardening.sql`.
-3. Deploy the `api` Edge Function.
-4. Run the smoke checks; then set `WEEKLY_HIDE_ANSWERS=false` only if a client
-   still needs answers during an open weekly window.
-5. Do not set `REQUIRE_BASE_REVISION=true` until every client sends
-   `baseUpdatedAt`.
+1. `GET ?action=health` returns `"version":"1.64"`.
+2. `supabase migration list --linked` shows `20261115000000` on both sides.
+3. `GET ?action=getsettings` does not contain `adminEmail`.
+4. An unauthenticated `synccorrectionssince` POST returns 401.
+
+Set `WEEKLY_HIDE_ANSWERS=false` only if a client still needs answers during an
+open weekly window. Do not set `REQUIRE_BASE_REVISION=true` until every client
+sends `baseUpdatedAt`.
 
 ## Verify
 
@@ -55,10 +54,7 @@ handler suites.
 
 ## Git
 
-The backend worktree previously carried unrelated cleanup changes and a local
-branch that was behind `origin/main`. Those cleanup changes are committed
-separately, and the local qid work is rebased onto current `origin/main` before
-pushing.
+`main` is clean and pushed. The repository is private.
 
 Do not force-push. Do not include a real `.env` or `supabase/.temp/` in Git.
 
