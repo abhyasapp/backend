@@ -72,6 +72,32 @@ assert.equal(DB.tables.question_reports[0].status, 'resolved');
 assert.equal(DB.tables.question_reports[0].corrected, 'true');
 ok('batch applies both fixes, closes the report, and writes qid correction events');
 
+r = await call(R.adminlistcorrectionevents, {
+  username: 'admin', token: 'admin-token', fileId: 'fileA', limit: 10,
+});
+assert.equal(r.success, true);
+assert.equal(r.events.length, 2);
+const byQid = Object.fromEntries(r.events.map(e => [e.qid, e]));
+assert.equal(byQid[48214].fileId, 'fileA');
+assert.equal(byQid[48214].admin, 'admin');
+assert.equal(byQid[48214].before.question, '14. Other stem');
+assert.equal(byQid[48214].after.question, '14. Better stem');
+ok('adminListCorrectionEvents returns the full event audit trail');
+
+r = await call(R.adminlistcorrectionevents, {
+  username: 'admin', token: 'admin-token', fileId: 'fileA', qid: 48213,
+});
+assert.equal(r.success, true);
+assert.equal(r.events.length, 1);
+assert.equal(r.events[0].qid, 48213);
+ok('adminListCorrectionEvents can filter by stable qid');
+
+r = await call(R.adminlistcorrectionevents, {
+  username: 'sita', token: 'user-token', fileId: 'fileA',
+});
+assert.equal(r.success, false);
+ok('adminListCorrectionEvents rejects a non-admin session');
+
 r = await call(R.adminapplycorrections, {
   username: 'admin', token: 'admin-token',
   items: JSON.stringify([{

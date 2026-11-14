@@ -822,6 +822,43 @@ export async function adminlistcorrections(params: Record<string, unknown>) {
   return json({ success: true, all, byFile, totalCount: all.length });
 }
 
+// Full per-edit audit trail. adminListCorrections only exposes the snapshot on
+// reports that were closed; a direct edit or a restore lives here instead.
+// Reports managers need qreports_view, not logs_view, so this works for the
+// same people who can open the report console.
+export async function adminlistcorrectionevents(params: Record<string, unknown>) {
+  const admin = await authAdmin(params, 'qreports_view');
+  if (!admin.ok) return json(admin.error);
+
+  const fileId = String(params.fileId || '').trim().slice(0, 300);
+  const qid = qidString(params.qid);
+  const limit = Math.max(1, Math.min(2000, Number(params.limit) || 500));
+  const data = await selectAll('correction_events', '*', {
+    orderBy: 'id', ascending: false, max: limit,
+    apply: q => {
+      let out = fileId ? q.eq('file_id', fileId) : q;
+      if (qid) out = out.eq('qid', qid);
+      return out;
+    },
+  });
+
+  const events = data.map(e => ({
+    id: e.id,
+    dedupeKey: e.dedupe_key,
+    uid: e.uid,
+    qid: qidString(e.qid) ? Number(qidString(e.qid)) : null,
+    fileId: e.file_id,
+    reportId: e.report_id || '',
+    correctedAt: e.corrected_at,
+    before: safeJsonParse<Record<string, any>>(e.before, {}),
+    after: safeJsonParse<Record<string, any>>(e.after, {}),
+    note: e.note || '',
+    admin: e.admin_user || '',
+    createdAt: e.created_at || '',
+  }));
+  return json({ success: true, events, totalCount: events.length, limit });
+}
+
 export async function adminexportcorrections(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'qreports_view');
   if (!admin.ok) return json(admin.error);
