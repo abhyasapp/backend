@@ -225,13 +225,17 @@ export async function getcorrections(params: Record<string, unknown>) {
     }
   } catch { /* ignore */ }
 
-  const { data: reports } = await supabase.from('question_reports').select('uid,qid,resolved_at').eq('reported_by', auth.username).eq('status', 'resolved').order('resolved_at', { ascending: false }).limit(50);
+  const { data: reports } = await supabase.from('question_reports').select('uid,qid,resolved_at,corrected').eq('reported_by', auth.username).eq('status', 'resolved').order('resolved_at', { ascending: false }).limit(50);
   const resolvedMine = (reports || []).map(r => ({
     uid: String(r.uid || ''),
     qid: qidString(r.qid) ? Number(qidString(r.qid)) : null,
     at: new Date(String(r.resolved_at || '')).getTime() || 0,
+    corrected: String(r.corrected || '').toLowerCase() === 'true',
   })).filter(r => r.uid && r.at > since).slice(0, 10);
-  return json({ success: true, now: Date.now(), files, resolvedMine });
+  // A report closed as "no change needed" is still resolved, but calling it
+  // corrected tells the student their question changed when it did not.
+  const correctedMine = resolvedMine.filter(r => r.corrected);
+  return json({ success: true, now: Date.now(), files, resolvedMine, correctedMine });
 }
 
 const HARD_CACHE_KEY = 'private_hard_questions';
@@ -342,8 +346,9 @@ export async function adminupdatequestionreportstatus(params: Record<string, unk
     const { data: siblings } = await siblingQuery;
     for (const s of (siblings || [])) {
       const sibPatch: Record<string, unknown> = {
-        status: 'resolved', resolved_at: patch.resolved_at, resolved_by: patch.resolved_by, corrected: 'true',
+        status: 'resolved', resolved_at: patch.resolved_at, resolved_by: patch.resolved_by,
       };
+      if (signal) sibPatch.corrected = 'true';
       if (snap) sibPatch.corrected_snapshot = snap;
       if (idx !== null && idx !== undefined) sibPatch.correct_index = idx;
       await supabase.from('question_reports').update(sibPatch).eq('id', s.id);

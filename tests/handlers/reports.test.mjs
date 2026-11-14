@@ -191,4 +191,24 @@ assert.equal(r.success, false);
 assert.equal(r.code, 'unauthorized');
 ok('the pipeline endpoint still requires SYNC_KEY');
 
+// Closing a report as "no change needed" must not tell the student their
+// question was corrected. The admin can resolve a report without touching
+// the question file, so only correctedMine may drive the "corrected" toast.
+DB.tables.question_reports.push({
+  id: 'reviewed-only', uid: 'fileA_1', qid: '48214', file_id: 'fileA', status: 'open',
+  reason: 'unclear', question_snapshot: '14. Better stem',
+  options_snapshot: '["c","d"]', reported_by: 'sita', reported_at: at,
+});
+r = await call(R.adminupdatequestionreportstatus, {
+  username: 'admin', token: 'admin-token', id: 'reviewed-only', status: 'resolved', corrected: false,
+});
+assert.equal(r.success, true);
+r = await call(R.getcorrections, { username: 'sita', token: 'user-token', since: 0 });
+assert.equal(r.success, true);
+const reviewed = r.resolvedMine.find(x => x.uid === 'fileA_1');
+assert.equal(reviewed.corrected, false);
+assert.equal(r.correctedMine.some(x => x.uid === 'fileA_1'), false);
+assert.equal(r.correctedMine.some(x => x.uid === 'fileA_0'), true);
+ok('a no-change resolution is not reported to the student as a correction');
+
 console.log(`\nALL ${n} REPORT/CORRECTION CHECKS PASSED`);
