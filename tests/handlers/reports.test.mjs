@@ -123,6 +123,30 @@ assert.equal(DB.tables.question_reports.find(x => x.id === 'legacy-1').qid, '482
 assert.equal(DB.tables.question_reports.length, 2);
 ok('the qid backfill writes only the matched report and deletes nothing');
 
+// Drive-backed objective files are not in Supabase Storage; their public CDN
+// mirror must be used or every legacy report is falsely counted as noFile.
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).includes('/content/drive-file.json')) {
+    return { ok: true, json: async () => ({ questions: [{ id: 777, q: '15. Drive stem', options: ['x', 'y'], correct: 0 }] }) };
+  }
+  return { ok: false, json: async () => ({}) };
+};
+DB.tables.question_reports.push({
+  id: 'legacy-drive', uid: 'drive-file_0', qid: '', file_id: 'drive-file', status: 'open',
+  reason: 'wrong_answer', question_snapshot: '15. Drive stem',
+  options_snapshot: '["x","y"]', reported_by: 'sita', reported_at: at,
+});
+r = await call(R.adminbackfillreportqids, {
+  username: 'admin', token: 'admin-token', apply: false,
+});
+globalThis.fetch = nativeFetch;
+assert.equal(r.success, true);
+assert.equal(r.matched, 1);
+assert.equal(r.noFile, 0);
+assert.equal(r.examples[0].qid, 777);
+ok('the qid backfill falls back to the CDN for Drive-backed chapter files');
+
 r = await call(R.adminapplycorrections, {
   username: 'admin', token: 'admin-token',
   items: JSON.stringify([{

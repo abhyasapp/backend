@@ -387,6 +387,35 @@ function flattenQuestions(raw: unknown): any[] {
   return [];
 }
 
+/* Objective chapter files live on Drive and are mirrored to the public content
+   CDN under their Drive id. Older reports store that Drive id, so reading only
+   Supabase Storage reports every one of them as "file missing" even though the
+   student app can load the file. Try Storage first (subjective files), then the
+   read-only CDN mirror. */
+async function loadQuestionFile(fileId: string): Promise<any[] | null> {
+  // Subjective files live in Storage; objective chapter files live on Drive and
+  // are mirrored to the CDN. Try Storage briefly, then fall back. A bare Drive
+  // id often makes Storage wait, so cap that attempt instead of spending the
+  // whole request timeout on a key that cannot exist there.
+  try {
+    const download = supabase.storage.from('subjective-content').download(fileId)
+      .catch(() => ({ data: null, error: true }));
+    const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), 1500));
+    const hit: any = await Promise.race([download, timeout]);
+    if (hit && !hit.error && hit.data) return flattenQuestions(JSON.parse(await hit.data.text()));
+  } catch { /* fall through to the CDN */ }
+
+  if (!/^[A-Za-z0-9_-]+$/.test(fileId)) return null;
+  const base = (Deno.env.get('CONTENT_CDN_BASE') || 'https://cdn.jsdelivr.net/gh/abhyasapp/content@main').replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${base}/content/${encodeURIComponent(fileId)}.json`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    return flattenQuestions(await res.json());
+  } catch { return null; }
+}
+
 export async function admingetquestion(params: Record<string, unknown>) {
   const admin = await authAdmin(params, 'qreports_manage');
   if (!admin.ok) return json(admin.error);
@@ -909,11 +938,7 @@ export async function adminbackfillreportqids(params: Record<string, unknown>) {
 
     let arr = files.get(fileId);
     if (arr === undefined) {
-      try {
-        const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
-        if (error || !blob) throw new Error('File not found');
-        arr = flattenQuestions(JSON.parse(await blob.text()));
-      } catch { arr = null; }
+      arr = await loadQuestionFile(fileId);
       files.set(fileId, arr);
     }
     if (!arr) { noFile++; continue; }

@@ -43,6 +43,11 @@ assert.equal(DB.tables.admins.filter((a) => a.role === 'owner').length, 1);
 
 // 4. owner-only management
 DB.tables.users = [{ username: 'sita', pass_hash: await makeStoredHash('Sita-pass-1'), status: 'trial', name: 'Sita', email: '', mobile: '' }];
+r = await call(Auth.login, { username: 'SITA', password: 'Sita-pass-1' });
+assert.equal(r.success, true);
+r = await call(Auth.login, { username: 'sita', password: 'Sita-pass-1' });
+assert.equal(r.success, true);
+ok('student login accepts a different username case, exact match still wins');
 const O = { username: 'admin', token: tok };
 r = await call(A.admincreateadmin, { ...O, newUsername: 'root', password: 'Str0ngPass!' }); assert.equal(r.success, false); // reserved
 r = await call(A.admincreateadmin, { ...O, newUsername: 'sita', password: 'Str0ngPass!' }); assert.equal(r.success, false); // student exists

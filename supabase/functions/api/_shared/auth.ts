@@ -100,11 +100,23 @@ export async function authAdmin(
 export async function findUserByIdentifier(identifier: string) {
   const id = identifier.trim();
   if (!id) return null;
-  let q = supabase.from('users').select('*').eq('username', id).limit(1);
-  if (id.includes('@')) q = supabase.from('users').select('*').ilike('email', escLike(id)).limit(1);
-  else if (/^(98|97|96|99)\d{8}$/.test(id)) q = supabase.from('users').select('*').eq('mobile', id).limit(1);
-  const { data } = await q;
-  return data && data[0] ? data[0] : null;
+
+  if (id.includes('@')) {
+    const { data } = await supabase.from('users').select('*').ilike('email', escLike(id)).limit(1);
+    return data && data[0] ? data[0] : null;
+  }
+  if (/^(98|97|96|99)\d{8}$/.test(id)) {
+    const { data } = await supabase.from('users').select('*').eq('mobile', id).limit(1);
+    return data && data[0] ? data[0] : null;
+  }
+
+  // Usernames are typed by hand, so accept a different case after an exact
+  // match. Only use the case-insensitive hit when it is unique: two accounts
+  // that differ only by case must never log into each other's account.
+  const exact = await supabase.from('users').select('*').eq('username', id).limit(1);
+  if (exact.data && exact.data[0]) return exact.data[0];
+  const { data } = await supabase.from('users').select('*').ilike('username', escLike(id)).limit(2);
+  return data && data.length === 1 ? data[0] : null;
 }
 
 export function requireAccess(auth: { ok: true; username: string; user: Record<string, unknown> }) {
