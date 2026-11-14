@@ -17,6 +17,30 @@ function qidString(v: unknown): string {
   return /^\d+$/.test(s) ? s : '';
 }
 
+/* A report made before questions had ids stores only the text the student saw.
+   Numbers are decorative (parts get renumbered), so compare the words. */
+function normalizedQuestionText(v: unknown): string {
+  return String(v == null ? '' : v)
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/^\s*\d+\s*[\.\)]\s*/, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sameReportedQuestion(snapshot: unknown, current: unknown): boolean {
+  const a = normalizedQuestionText(snapshot);
+  const b = normalizedQuestionText(current);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  // The report snapshot can be truncated; a long prefix is still a match.
+  if (a.length >= 40 && b.startsWith(a)) return true;
+  if (b.length >= 40 && a.startsWith(b)) return true;
+  return false;
+}
+
 function asText(v: unknown, fallback = ''): string {
   return typeof v === 'string' ? v : v == null ? fallback : JSON.stringify(v);
 }
@@ -857,6 +881,72 @@ export async function adminlistcorrectionevents(params: Record<string, unknown>)
     createdAt: e.created_at || '',
   }));
   return json({ success: true, events, totalCount: events.length, limit });
+}
+
+// Older reports predate stable qids. Match their saved text to the current
+// file, but only apply a match when exactly one question has that text; never
+// guess from a position and never delete a report. `apply` is opt-in.
+export async function adminbackfillreportqids(params: Record<string, unknown>) {
+  const admin = await authAdmin(params, 'qreports_manage');
+  if (!admin.ok) return json(admin.error);
+
+  const apply = params.apply === true || String(params.apply) === 'true';
+  const limit = Math.max(1, Math.min(5000, Number(params.limit) || 2000));
+  const reports = await selectAll('question_reports', '*', {
+    orderBy: 'id', max: limit, apply: q => q.eq('qid', ''),
+  });
+  const candidates = reports.filter((r: any) => !qidString(r.qid));
+  const files = new Map<string, any[] | null>();
+  let matched = 0, applied = 0, ambiguous = 0, noMatch = 0;
+  let noFile = 0, noQuestionId = 0, failed = 0;
+  const examples: any[] = [];
+
+  for (const r of candidates) {
+    const snapshot = String(r.question_snapshot || '').trim();
+    const fileId = String(r.file_id || '').trim()
+      || String(r.uid || '').replace(/_\d+$/, '');
+    if (!fileId || !snapshot) { noMatch++; continue; }
+
+    let arr = files.get(fileId);
+    if (arr === undefined) {
+      try {
+        const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
+        if (error || !blob) throw new Error('File not found');
+        arr = flattenQuestions(JSON.parse(await blob.text()));
+      } catch { arr = null; }
+      files.set(fileId, arr);
+    }
+    if (!arr) { noFile++; continue; }
+
+    const atMatch = String(r.uid || '').match(/_(\d+)$/);
+    const at = atMatch ? Number(atMatch[1]) : -1;
+    let hit: any = null;
+    if (at >= 0 && arr[at] && sameReportedQuestion(snapshot, arr[at].q || arr[at].question)) {
+      hit = arr[at];
+    }
+    if (!hit) {
+      const hits = arr.filter((q: any) => sameReportedQuestion(snapshot, q.q || q.question));
+      if (hits.length === 1) hit = hits[0];
+      else if (hits.length > 1) { ambiguous++; continue; }
+    }
+    if (!hit) { noMatch++; continue; }
+
+    const qid = qidString(hit.id);
+    if (!qid) { noQuestionId++; continue; }
+    matched++;
+    if (examples.length < 10) {
+      examples.push({ reportId: r.id, qid: Number(qid), text: String(snapshot).slice(0, 120) });
+    }
+    if (apply) {
+      const { error } = await supabase.from('question_reports').update({ qid }).eq('id', r.id);
+      if (error) failed++; else applied++;
+    }
+  }
+
+  return json({
+    success: true, apply, scanned: candidates.length, matched, applied,
+    ambiguous, noMatch, noFile, noQuestionId, failed, examples,
+  });
 }
 
 export async function adminexportcorrections(params: Record<string, unknown>) {

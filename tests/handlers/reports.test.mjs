@@ -98,6 +98,31 @@ r = await call(R.adminlistcorrectionevents, {
 assert.equal(r.success, false);
 ok('adminListCorrectionEvents rejects a non-admin session');
 
+DB.tables.question_reports.push({
+  id: 'legacy-1', uid: 'fileA_1', qid: '', file_id: 'fileA', status: 'open',
+  reason: 'wrong_answer', question_snapshot: '14. Better stem',
+  options_snapshot: '["c","d"]', reported_by: 'sita', reported_at: at,
+});
+r = await call(R.adminbackfillreportqids, {
+  username: 'admin', token: 'admin-token', apply: false,
+});
+assert.equal(r.success, true);
+assert.equal(r.scanned, 1);
+assert.equal(r.matched, 1);
+assert.equal(r.applied, 0);
+assert.equal(r.examples[0].qid, 48214);
+assert.equal(DB.tables.question_reports.find(x => x.id === 'legacy-1').qid, '');
+ok('the qid backfill previews a unique text match without writing');
+
+r = await call(R.adminbackfillreportqids, {
+  username: 'admin', token: 'admin-token', apply: true,
+});
+assert.equal(r.success, true);
+assert.equal(r.applied, 1);
+assert.equal(DB.tables.question_reports.find(x => x.id === 'legacy-1').qid, '48214');
+assert.equal(DB.tables.question_reports.length, 2);
+ok('the qid backfill writes only the matched report and deletes nothing');
+
 r = await call(R.adminapplycorrections, {
   username: 'admin', token: 'admin-token',
   items: JSON.stringify([{

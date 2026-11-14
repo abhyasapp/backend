@@ -99,6 +99,7 @@ const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> =
   'adminapplycorrections': Reports.adminapplycorrections,
   'adminlistcorrections': Reports.adminlistcorrections,
   'adminlistcorrectionevents': Reports.adminlistcorrectionevents,
+  'adminbackfillreportqids': Reports.adminbackfillreportqids,
   'adminexportcorrections': Reports.adminexportcorrections,
   'adminmarkfilecorrected': Reports.adminmarkfilecorrected,
   'synccorrectionssince': Reports.synccorrectionssince,
