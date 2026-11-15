@@ -104,6 +104,7 @@ const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> =
   'adminmarkfilecorrected': Reports.adminmarkfilecorrected,
   'synccorrectionssince': Reports.synccorrectionssince,
   'syncreportssince': Reports.syncreportssince,
+  'clearreports': Reports.clearreports,
   'adminmostmissedquestions': Reports.adminmostmissedquestions,
   'adminuploadweeklysetfile': Reports.adminuploadweeklysetfile,
   'adminuploadsubjectivefile': Reports.adminuploadsubjectivefile,

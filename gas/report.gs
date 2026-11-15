@@ -407,6 +407,20 @@ function adminDeleteQuestionReport(p) {
   });
 }
 
+/* Bulk clear of the Q-reports sheet (run once from the editor after
+   migrating reports to Neon). Keeps the header row. */
+function clearAllQReports() {
+  return withLock_(() => {
+    const sheet = getQReportsSheet_();
+    const last = sheet.getLastRow();
+    if (last <= 1) return { success: true, cleared: 0 };
+    sheet.deleteRows(2, last - 1);
+    _invalidateSheet_(QREPORTS_SHEET);
+    logAction_('system', 'Clear All Q Reports', 'bulk', '');
+    return { success: true, cleared: last - 1 };
+  });
+}
+
 /* ── Question editor helpers ──────────────────────────────────────── */
 
 /* Shared with gas/content-index.gs. Keep this one definition; the copy in
@@ -982,6 +996,7 @@ const REPORT_ROUTES_ = {
   adminlistquestionreports:        function (p) { return adminListQuestionReports(p); },
   adminupdatequestionreportstatus: function (p) { return adminUpdateQuestionReportStatus(p); },
   admindeletequestionreport:       function (p) { return adminDeleteQuestionReport(p); },
+  clearallqreports:                function (p) { return clearAllQReports(); },
   admingetquestion:                function (p) { return adminGetQuestion(p); },
   adminupdatequestion:             function (p) { return adminUpdateQuestion(p); },
   adminmarkfilecorrected:          function (p) { return adminMarkFileCorrected(p); },

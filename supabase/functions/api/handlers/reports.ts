@@ -786,6 +786,23 @@ function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+// One-time destructive clear of all reported questions (SYNC_KEY auth).
+// Used after migrating reports to Neon (reported_questions table).
+export async function clearreports(params: Record<string, unknown>) {
+  const expected = Deno.env.get('SYNC_KEY') || Deno.env.get('ABHYAS_SYNC_KEY') || '';
+  if (!expected) return json({ success: false, code: 'not_configured', error: 'SYNC_KEY is not set.' }, 503);
+  const key = String(params.key || '');
+  if (!key || !constantTimeEqual(key, expected)) {
+    return json({ success: false, code: 'unauthorized', error: 'bad key' }, 401);
+  }
+  if (params.confirm !== 'CLEAR_ALL_REPORTS') {
+    return json({ success: false, error: 'pass confirm=CLEAR_ALL_REPORTS' });
+  }
+  const { error, count } = await supabase.from('question_reports').delete().neq('id', '');
+  if (error) return json({ success: false, error: dbMsg(error) }, 500);
+  return json({ success: true, deleted: count ?? null });
+}
+
 // Pipeline audit: expose reports (with qid) to the Neon pipeline so reported
 // questions can be joined against Neon questions for dedupe/correction status.
 // SYNC_KEY auth, like syncCorrectionsSince.
@@ -812,12 +829,21 @@ export async function syncreportssince(params: Record<string, unknown>) {
       uid: r.uid,
       qid: qid ? Number(qid) : null,
       fileId: r.file_id,
-      status: r.status,
+      questionSnapshot: r.question_snapshot,
+      optionsSnapshot: r.options_snapshot,
+      correctIndex: r.correct_index,
+      chosenIndex: r.chosen_index,
       reason: r.reason,
+      note: r.note,
       reportedBy: r.reported_by,
       reportedAt: isFinite(atMs) ? new Date(atMs).toISOString() : (r.reported_at || ''),
-      questionSnapshot: String(r.question_snapshot || '').slice(0, 300),
+      status: r.status,
+      resolvedAt: r.resolved_at,
+      resolvedBy: r.resolved_by,
       corrected: !!r.corrected,
+      correctedSnapshot: r.corrected_snapshot,
+      section: r.section,
+      appVersion: r.app_version,
     });
   }
   return json({ success: true, reports: out, count: out.length });
