@@ -786,6 +786,43 @@ function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+// Pipeline audit: expose reports (with qid) to the Neon pipeline so reported
+// questions can be joined against Neon questions for dedupe/correction status.
+// SYNC_KEY auth, like syncCorrectionsSince.
+export async function syncreportssince(params: Record<string, unknown>) {
+  const expected = Deno.env.get('SYNC_KEY') || Deno.env.get('ABHYAS_SYNC_KEY') || '';
+  if (!expected) {
+    return json({ success: false, code: 'not_configured', error: 'SYNC_KEY is not set on the api function.' }, 503);
+  }
+  const key = String(params.key || '');
+  if (!key || !constantTimeEqual(key, expected)) {
+    return json({ success: false, code: 'unauthorized', error: 'ABHYAS_SYNC_KEY does not match SYNC_KEY in the api function environment.' }, 401);
+  }
+
+  const since = Math.max(0, Number(params.since) || 0);
+  const limit = Math.max(1, Math.min(5000, Number(params.limit) || 2000));
+  const rows = await selectAll('question_reports', '*', { orderBy: 'id', max: limit });
+  const out: any[] = [];
+  for (const r of (rows || [])) {
+    const atMs = new Date(String(r.reported_at || r.created_at || '')).getTime();
+    if (since && (!isFinite(atMs) || atMs <= since)) continue;
+    const qid = qidString(r.qid);
+    out.push({
+      id: r.id,
+      uid: r.uid,
+      qid: qid ? Number(qid) : null,
+      fileId: r.file_id,
+      status: r.status,
+      reason: r.reason,
+      reportedBy: r.reported_by,
+      reportedAt: isFinite(atMs) ? new Date(atMs).toISOString() : (r.reported_at || ''),
+      questionSnapshot: String(r.question_snapshot || '').slice(0, 300),
+      corrected: !!r.corrected,
+    });
+  }
+  return json({ success: true, reports: out, count: out.length });
+}
+
 export async function synccorrectionssince(params: Record<string, unknown>) {
   const expected = Deno.env.get('SYNC_KEY') || Deno.env.get('ABHYAS_SYNC_KEY') || '';
   if (!expected) {
