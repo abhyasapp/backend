@@ -408,7 +408,8 @@ function adminDeleteQuestionReport(p) {
 }
 
 /* One-time export of the whole Q-reports sheet as JSON (for migrating to
-   Neon). Run from the editor; copy the logged JSON into a file. */
+   Neon). Run from the editor; it writes gas_reports.json to your Google
+   Drive root and logs the download link. */
 function exportAllQReports() {
   return withLock_(() => {
     const sheet = getQReportsSheet_();
@@ -421,7 +422,10 @@ function exportAllQReports() {
       for (let j = 0; j < headers.length; j++) r[headers[j]] = data[i][j];
       rows.push(r);
     }
-    return { success: true, count: rows.length, rows: rows };
+    const json = JSON.stringify({ success: true, count: rows.length, rows: rows });
+    const file = DriveApp.createFile('gas_reports.json', json, MimeType.PLAIN_TEXT);
+    console.log('gas_reports.json created: ' + file.getUrl());
+    return { success: true, count: rows.length, fileId: file.getId(), url: file.getUrl() };
   });
 }
 
