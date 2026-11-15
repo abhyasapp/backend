@@ -124,3 +124,75 @@ console.log('GAS sync harness: all assertions passed');
 
   console.log('GAS correction-sync contract: all assertions passed');
 })();
+
+/* ── header top-up contract (gas/code.gs, _topUpHeaders_) ─────────────
+   A sheet created before QREPORT_HEADERS gained "id" at the FRONT must still
+   get that key column, or syncPush refuses the table forever. */
+(function () {
+  var H = ['id','uid','fileId','questionSnapshot','reason','note','reportedBy','reportedAt','status',
+    'optionsSnapshot','correctIndex','chosenIndex','section','appVersion','resolvedAt','resolvedBy','corrected',
+    'correctedSnapshot','qid'];
+  function sheetWith(headers, name) {
+    var data = [headers.slice()];
+    return {
+      getName: function () { return name; },
+      getLastColumn: function () { return data[0].length; },
+      getRange: function (row, col, nRows, nCols) {
+        var cell = {
+          getValues: function () {
+            return data.slice(row - 1, row - 1 + nRows)
+              .map(function (line) { return line.slice(col - 1, col - 1 + nCols); });
+          },
+          setValues: function (values) {
+            values.forEach(function (line, i) {
+              var at = row - 1 + i;
+              if (!data[at]) data[at] = [];
+              line.forEach(function (x, j) { data[at][col - 1 + j] = x; });
+            });
+            return cell;
+          },
+          setFontWeight: function () { return cell; },
+          setBackground: function () { return cell; },
+          setFontColor: function () { return cell; }
+        };
+        return cell;
+      },
+      headers: function () { return data[0]; }
+    };
+  }
+
+  var ctx = vm.createContext({
+    console: console,
+    SpreadsheetApp: { BandingTheme: { PINK: 1, BLUE: 1, LIGHT_GREY: 1 } },
+    PropertiesService: {
+      getScriptProperties: function () { return { getProperty: function () { return null; }, setProperty: function () {} }; },
+      getUserProperties: function () { return { getProperty: function () { return null; } }; }
+    },
+    Utilities: { getUuid: function () { return 'u'; } },
+    DriveApp: {}, CacheService: { getScriptCache: function () { return {}; } },
+    Session: { getActiveUser: function () { return { getEmail: function () { return ''; } }; } },
+    HtmlService: { createHtmlOutputFromFile: function () { return {}; } }
+  });
+  vm.runInContext(fs.readFileSync(require('path').join(__dirname, '..', 'gas', 'code.gs'), 'utf8'), ctx);
+  var topUp = vm.runInContext('_topUpHeaders_', ctx);
+
+  // A sheet from before "id" was added at the front of QREPORT_HEADERS.
+  var old = sheetWith(H.slice(1), 'QuestionReports');
+  topUp(old, H, '#d81b60');
+  assert.ok(old.headers().indexOf('id') !== -1, 'the missing key column must be added');
+  assert.equal(old.headers().length, H.length);
+  assert.deepEqual(old.headers().slice(0, 3), ['uid', 'fileId', 'questionSnapshot'],
+    'existing columns must keep their names and order');
+
+  // A complete sheet is left alone, and a padded header is not duplicated.
+  var done = sheetWith(H, 'QuestionReports2');
+  topUp(done, H, '#d81b60');
+  assert.equal(done.headers().length, H.length, 'a complete sheet must not be extended');
+
+  var padded = sheetWith(H.slice(1).concat([' id ']), 'QuestionReports3');
+  topUp(padded, H, '#d81b60');
+  assert.equal(padded.headers().filter(function (h) { return String(h).trim() === 'id'; }).length, 1,
+    '" id " already names the key column');
+
+  console.log('GAS header top-up contract: all assertions passed');
+})();

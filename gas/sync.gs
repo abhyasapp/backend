@@ -117,7 +117,9 @@ function syncPush(p) {
       try {
         const sheet = def.get();
         const lastCol = sheet.getLastColumn();
-        const headers = lastCol >= 1 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) { return String(h); }) : [];
+        /* Trim, the same way _topUpHeaders_ reads them, so a header saved with
+           stray whitespace is not "missing" here and "present" there. */
+        const headers = lastCol >= 1 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) { return String(h).trim(); }) : [];
         if (!headers.length) { errors[name] = "sheet has no headers"; return; }
         const missingKey = def.key.filter(function (c) { return headers.indexOf(c) === -1; });
         if (missingKey.length) { errors[name] = "sheet is missing key column(s): " + missingKey.join(","); return; }

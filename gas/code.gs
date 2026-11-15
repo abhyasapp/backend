@@ -331,13 +331,27 @@ function _getOrCreateSheet_(name, headers, formatAsText, headerColor, bandTheme,
   return sheet;
 }
 
+/* Add any header the sheet is missing, matched by NAME.
+
+   This used to assume the sheet's columns were a prefix of `headers` and
+   append `headers.slice(lastCol)`. That only holds while new headers are added
+   at the end. QREPORT_HEADERS gained "id" at the front, so every sheet created
+   before that kept 17 columns under the wrong names, the positional guess
+   appended the *last* 17 headers instead of the missing ones, and "id" was
+   never added — syncPush then refused the table for good with "sheet is
+   missing key column(s): id". Comparing by name fixes it for every sheet. */
 function _topUpHeaders_(sheet, headers, headerColor) {
   const name = sheet.getName();
   if (_migratedSheets[name]) return;
   _migratedSheets[name] = true;
   const lastCol = sheet.getLastColumn();
-  if (lastCol >= headers.length) return;
-  const missing = headers.slice(lastCol);
+  const current = lastCol >= 1
+    ? sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) { return String(h).trim(); })
+    : [];
+  const present = {};
+  current.forEach(function (h) { if (h) present[h] = true; });
+  const missing = headers.filter(function (h) { return !present[h]; });
+  if (!missing.length) return;
   sheet.getRange(1, lastCol + 1, 1, missing.length)
     .setValues([missing])
     .setFontWeight("bold")
