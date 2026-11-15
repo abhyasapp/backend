@@ -14,8 +14,15 @@ function safeJsonParse<T = unknown>(s: unknown, fallback: T): T {
 
 function qidString(v: unknown): string {
   const s = String(v == null ? '' : v).trim();
-  return /^\d+$/.test(s) ? s : '';
+  if (/^\d+$/.test(s)) return s;
+  // Public qn ids are now hyphenated (LCCCSSSFQQQQ). Accept any reasonable
+  // casing and normalise to a stable lowercase form so dedup, sibling-closure
+  // and correction-event idempotency keys stay consistent across the stack.
+  return /^[A-Za-z0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{6}$/.test(s)
+    ? s.replace(/[^A-Za-z0-9-]/g, '').toLowerCase()
+    : '';
 }
+
 
 /* A report made before questions had ids stores only the text the student saw.
    Numbers are decorative (parts get renumbered), so compare the words. */
@@ -228,7 +235,7 @@ export async function getcorrections(params: Record<string, unknown>) {
   const { data: reports } = await supabase.from('question_reports').select('uid,qid,resolved_at,corrected').eq('reported_by', auth.username).eq('status', 'resolved').order('resolved_at', { ascending: false }).limit(50);
   const resolvedMine = (reports || []).map(r => ({
     uid: String(r.uid || ''),
-    qid: qidString(r.qid) ? Number(qidString(r.qid)) : null,
+    qid: qidString(r.qid) ? qidString(r.qid) : null,
     at: new Date(String(r.resolved_at || '')).getTime() || 0,
     corrected: String(r.corrected || '').toLowerCase() === 'true',
   })).filter(r => r.uid && r.at > since).slice(0, 10);
@@ -940,7 +947,7 @@ export async function synccorrectionssince(params: Record<string, unknown>) {
     const numMatch = String(r.uid || '').match(/^(.+)_(\d+)$/);
     const entry = {
       uid: String(snap.uid || r.id),
-      qid: qidString(r.qid) ? Number(qidString(r.qid)) : null,
+      qid: qidString(r.qid) ? qidString(r.qid) : null,
       correctedAt: new Date(atMs).toISOString(),
       fileId: r.file_id,
       questionIndex: numMatch ? Number(numMatch[2]) : null,
@@ -992,7 +999,7 @@ export async function adminlistcorrections(params: Record<string, unknown>) {
     const key = r.file_id + '#' + r.uid; if (seen.has(key)) return; seen.add(key);
     const correctedSnapshot = safeJsonParse<Record<string, any> | null>(r.corrected_snapshot, null);
     const entry = {
-      id: r.id, uid: r.uid, qid: qidString(r.qid) ? Number(qidString(r.qid)) : null,
+      id: r.id, uid: r.uid, qid: qidString(r.qid) ? qidString(r.qid) : null,
       fileId: r.file_id, questionNumber: String(r.uid || '').split('_').pop(), reason: r.reason, note: r.note,
       reportedBy: r.reported_by, reportedAt: r.reported_at, correctedAt: r.resolved_at, correctedBy: r.resolved_by,
       oldSnapshot: { question: r.question_snapshot, options: safeJsonParse<unknown[]>(r.options_snapshot, []), correctIndex: r.correct_index },
@@ -1030,7 +1037,7 @@ export async function adminlistcorrectionevents(params: Record<string, unknown>)
     id: e.id,
     dedupeKey: e.dedupe_key,
     uid: e.uid,
-    qid: qidString(e.qid) ? Number(qidString(e.qid)) : null,
+    qid: qidString(e.qid) ? qidString(e.qid) : null,
     fileId: e.file_id,
     reportId: e.report_id || '',
     correctedAt: e.corrected_at,
