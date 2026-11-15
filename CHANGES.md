@@ -15,6 +15,8 @@
   hyphenated qid through report → correction event → `syncCorrectionsSince`.
 - `HANDOVER.md` / `NEXT-SESSION.md` version references follow
   `FUNCTION_VERSION` (1.67); their 1.64 live-state notes are history.
+- Deployed: Edge Function `api` version 50 on 15 November 2026; `health`
+  returns 1.67. Migrations unchanged (no schema change in this fix).
 
 ## 14 November 2026 — integrity and access hardening
 - Fail-closed trial access, rejected-session enforcement, reserved-name checks and

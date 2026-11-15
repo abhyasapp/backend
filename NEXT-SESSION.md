@@ -57,7 +57,7 @@ hops before falling back to the old text/identity matcher.
 - Apps Script fixes for gzip progress, authenticated hard-question stats,
   weekly answer hiding, reset URL, `adminEmail`, POST-only correction sync and
   the optional `LEGACY_API=off` switch.
-- API **1.64** was live on 14 November; the code has since moved to **1.67** (`_shared/config.ts`). Confirm with `?action=health`.
+- API **1.67** is deployed live (Edge Function `api` version 50, 15 November 2026); `?action=health` returns 1.67.
 - Migration `20261115000000_integrity_hardening.sql` is applied live.
 - Live checks (at the time): `action=health` returned 1.64; unique indexes exist; public
   `getsettings` omits `adminEmail`; unauthenticated correction sync returns 401.
