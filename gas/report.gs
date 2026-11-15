@@ -407,6 +407,24 @@ function adminDeleteQuestionReport(p) {
   });
 }
 
+/* One-time export of the whole Q-reports sheet as JSON (for migrating to
+   Neon). Run from the editor; copy the logged JSON into a file. */
+function exportAllQReports() {
+  return withLock_(() => {
+    const sheet = getQReportsSheet_();
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return { success: true, count: 0, rows: [] };
+    const headers = data[0];
+    const rows = [];
+    for (let i = 1; i < data.length; i++) {
+      const r = {};
+      for (let j = 0; j < headers.length; j++) r[headers[j]] = data[i][j];
+      rows.push(r);
+    }
+    return { success: true, count: rows.length, rows: rows };
+  });
+}
+
 /* Bulk clear of the Q-reports sheet (run once from the editor after
    migrating reports to Neon). Keeps the header row. */
 function clearAllQReports() {
@@ -997,6 +1015,7 @@ const REPORT_ROUTES_ = {
   adminupdatequestionreportstatus: function (p) { return adminUpdateQuestionReportStatus(p); },
   admindeletequestionreport:       function (p) { return adminDeleteQuestionReport(p); },
   clearallqreports:                function (p) { return clearAllQReports(); },
+  exportallqreports:               function (p) { return exportAllQReports(); },
   admingetquestion:                function (p) { return adminGetQuestion(p); },
   adminupdatequestion:             function (p) { return adminUpdateQuestion(p); },
   adminmarkfilecorrected:          function (p) { return adminMarkFileCorrected(p); },
