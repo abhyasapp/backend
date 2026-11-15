@@ -3513,7 +3513,7 @@ function handleGetFile(p) {
 
   let isAdminCaller = false;
   if (GETFILE_REQUIRES_AUTH) {
-    const adminActor = p.adminToken ? checkAdmin_({ adminToken: p.adminToken }) : null;
+    const adminActor = p.adminToken ? checkAdmin_({ adminToken: p.adminToken, username: p.username }) : null;
     if (adminActor) {
       isAdminCaller = true;
     } else {
@@ -3544,7 +3544,7 @@ function handleGetFile(p) {
 }
 
 function handleGetContentKey(p) {
-  const adminActor = p.adminToken ? checkAdmin_({ adminToken: p.adminToken }) : null;
+  const adminActor = p.adminToken ? checkAdmin_({ adminToken: p.adminToken, username: p.username }) : null;
   if (!adminActor) {
     const auth = authUser_(p);
     if (!auth.ok) return auth.error;
@@ -3578,7 +3578,7 @@ function handleGetFiles(p) {
 
   let isAdminCaller = false;
   if (GETFILE_REQUIRES_AUTH) {
-    const adminActor = p.adminToken ? checkAdmin_({ adminToken: p.adminToken }) : null;
+    const adminActor = p.adminToken ? checkAdmin_({ adminToken: p.adminToken, username: p.username }) : null;
     if (adminActor) {
       isAdminCaller = true;
     } else {

@@ -196,3 +196,35 @@ console.log('GAS sync harness: all assertions passed');
 
   console.log('GAS header top-up contract: all assertions passed');
 })();
+
+/* ── admin content read (gas/code.gs, handleGetFile) ──────────────────
+   The admin console signs in on Supabase and gets a Supabase-issued token.
+   GAS can only recognise it through bridgeHydrateAdminSession_, which needs the
+   username — so handleGetFile must pass both, or every admin content read is
+   refused and the console treats it as an expired session. */
+(function () {
+  var seen = [];
+  var ctx = vm.createContext({
+    console: console,
+    SpreadsheetApp: { BandingTheme: { PINK: 1, BLUE: 1, LIGHT_GREY: 1 } },
+    PropertiesService: {
+      getScriptProperties: function () { return { getProperty: function () { return null; }, setProperty: function () {} }; },
+      getUserProperties: function () { return { getProperty: function () { return null; } }; }
+    },
+    Utilities: { getUuid: function () { return 'u'; } },
+    DriveApp: {}, CacheService: { getScriptCache: function () { return {}; } },
+    Session: { getActiveUser: function () { return { getEmail: function () { return ''; } }; } },
+    HtmlService: { createHtmlOutputFromFile: function () { return {}; } }
+  });
+  vm.runInContext(fs.readFileSync(require('path').join(__dirname, '..', 'gas', 'code.gs'), 'utf8'), ctx);
+  vm.runInContext('checkAdmin_ = function (p) { __seen.push(p); return null; };', Object.assign(ctx, { __seen: seen }));
+  vm.runInContext('authUser_ = function () { return { ok: false, error: { success: false, error: "x", sessionInvalid: true } }; };', ctx);
+
+  vm.runInContext('handleGetFile({ fileId: "abc123", adminToken: "tok", username: "admin" })', ctx);
+  assert.equal(seen.length, 1, 'an admin token must be checked');
+  assert.equal(seen[0].adminToken, 'tok');
+  assert.equal(seen[0].username, 'admin',
+    'the username must travel with the token so the Supabase bridge can hydrate the session');
+
+  console.log('GAS admin content read: all assertions passed');
+})();
