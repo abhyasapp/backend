@@ -249,4 +249,86 @@ assert.equal(hyphenSynced.length, 1);
 assert.equal(hyphenSynced[0].qid, hyphenQid);
 ok('a hyphenated qid survives reports, correction events and the correction sync');
 
+// A report filed again for the same question after a reorder must dedupe on the
+// stable id, not on the position it used to sit at.
+r = await call(R.reportquestion, {
+  username: 'sita', token: 'user-token', uid: 'fileA_1', qid: 48214,
+  reason: 'unclear', note: 'first filing', questionSnapshot: '14. Better stem',
+  optionsSnapshot: ['c', 'd'], correctIndex: 0, chosenIndex: 1,
+});
+assert.equal(r.success, true);
+assert.equal(r.deduped, undefined);
+r = await call(R.reportquestion, {
+  username: 'sita', token: 'user-token', uid: 'fileA_9', qid: 48214,
+  reason: 'unclear', note: 'after reorder', questionSnapshot: '14. Better stem',
+  optionsSnapshot: ['c', 'd'], correctIndex: 0, chosenIndex: 1,
+});
+assert.equal(r.deduped, true);
+ok('a re-filed report dedupes by qid, not by its old position');
+
+// The public qn id is matched in canonical form and by id, so an uppercase id
+// with a stale position still opens the right question.
+r = await call(R.admingetquestion, {
+  username: 'admin', token: 'admin-token', fileId: 'fileB', index: 5, qid: 'A-123-456-789012',
+});
+assert.equal(r.success, true);
+assert.equal(r.index, 0);
+assert.equal(r.qid, 'a-123-456-789012');
+ok('a public qn id resolves by id, case-insensitively, ignoring the position');
+
+// The ids actually published in abhyasapp/content are "<fileId>-<position>"
+// (e.g. "1-VeNF…-1") and the files are top-level arrays. The old qidString()
+// rejected every one of them, so real reports stored qid '' and fell back to
+// the position. They must round-trip, and a correction must write the
+// explanation into the field the file already uses (`explain`).
+const realQid = '1-VeNFb81ynETihERKfWNUOZSqrYopyOH-1';
+DB.storage['subjective-content/fileC'] = JSON.stringify([
+  { id: realQid, q: '901. Real content shape', options: ['a', 'b'], correct: 0, explain: 'old text' },
+]);
+r = await call(R.reportquestion, {
+  username: 'sita', token: 'user-token', uid: 'fileC_0', qid: realQid,
+  reason: 'wrong_answer', note: 'real id', questionSnapshot: '901. Real content shape',
+  optionsSnapshot: ['a', 'b'], correctIndex: 1, chosenIndex: 0,
+});
+assert.equal(r.success, true);
+assert.equal(DB.tables.question_reports.find(x => x.uid === 'fileC_0').qid, realQid);
+r = await call(R.adminapplycorrections, {
+  username: 'admin', token: 'admin-token',
+  items: JSON.stringify([{
+    key: 'q' + realQid, uid: 'fileC_0', qid: realQid, fileId: 'fileC', index: 0,
+    correctedAt: '2026-11-14T12:00:00.000Z', expectedQ: '901. Real content shape',
+    after: { question: '901. Real content fixed', options: ['a', 'b'], correctIndex: 1, explanation: 'new text' },
+    closeReport: true,
+  }]),
+});
+assert.equal(r.success, true);
+assert.equal(r.results[0].ok, true);
+const fileC = JSON.parse(DB.storage['subjective-content/fileC']);
+assert.equal(fileC[0].q, '901. Real content fixed');
+assert.equal(fileC[0].explain, 'new text');
+assert.equal(fileC[0].explanation, undefined);
+ok('a published "<fileId>-<n>" qid round-trips and updates the existing explain field');
+
+// Reporting keys a question by its stable qid, so the same question answered
+// from two different positions (after a reorder) is one row, not two. A blob
+// with no qid must still be counted by uid, and a corrupt blob must not throw.
+DB.tables.progress = [
+  { username: 'sita', data: JSON.stringify({ prog: { sessions: [{ qres: [
+    { uid: 'fileA_0', qid: 48213, ok: false },
+    { uid: 'fileA_1', qid: 48213, ok: true },
+    { uid: 'fileA_2', ok: false },
+  ] }] } }) },
+  { username: 'ram', data: 'gz1:not-really-gzip' },
+];
+r = await call(R.adminmostmissedquestions, { username: 'admin', token: 'admin-token', minAttempts: 1 });
+assert.equal(r.success, true);
+const byId = Object.fromEntries(r.results.map(x => [x.id, x]));
+assert.equal(byId['48213'].total, 2);
+assert.equal(byId['48213'].wrong, 1);
+assert.equal(byId['48213'].qid, '48213');
+assert.equal(byId['48213'].fileId, 'fileA');
+assert.equal(byId['fileA_2'].qid, '');
+assert.equal(byId['fileA_2'].fileId, 'fileA');
+ok('most-missed questions merge a question by qid across positions');
+
 console.log(`\nALL ${n} REPORT/CORRECTION CHECKS PASSED`);

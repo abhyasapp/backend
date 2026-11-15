@@ -101,5 +101,19 @@ console.log('GAS sync harness: all assertions passed');
   // A hyphenated qid must survive the sheet round-trip as a string, not null.
   assert.equal(legacy.qid, 'a-123-456-789012');
 
+  // Published content ids are "<fileId>-<position>" and the old normaliser
+  // rejected all of them, so qid was stored as "". A question must also be
+  // located by its id before the position is trusted.
+  var normQid = vm.runInContext('normalizeQReportQid_', cctx);
+  assert.equal(normQid('1-VeNFb81ynETihERKfWNUOZSqrYopyOH-1'), '1-VeNFb81ynETihERKfWNUOZSqrYopyOH-1');
+  assert.equal(normQid(48213), '48213');
+  assert.equal(normQid('a-123-456-789012'), 'a-123-456-789012');
+  assert.equal(normQid('nonsense'), '');
+  var indexFor = vm.runInContext('questionIndexForId_', cctx);
+  var arrQ = [{ id: 'X-1' }, { id: '1-VeNF-2' }, { q: 'no id here' }];
+  assert.equal(indexFor(arrQ, 9, '1-VeNF-2'), 1, 'must resolve by id, ignoring the stale position');
+  assert.equal(indexFor(arrQ, 2, ''), 2, 'must use the position when no id was supplied');
+  assert.equal(indexFor(arrQ, 0, 'no-such-id'), -1, 'an unknown id must not fall back to the position');
+
   console.log('GAS correction-sync contract: all assertions passed');
 })();

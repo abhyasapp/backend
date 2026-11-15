@@ -15,14 +15,32 @@ function safeJsonParse<T = unknown>(s: unknown, fallback: T): T {
 function qidString(v: unknown): string {
   const s = String(v == null ? '' : v).trim();
   if (/^\d+$/.test(s)) return s;
-  // Public qn ids are now hyphenated (LCCCSSSFQQQQ). Accept any reasonable
-  // casing and normalise to a stable lowercase form so dedup, sibling-closure
-  // and correction-event idempotency keys stay consistent across the stack.
-  return /^[A-Za-z0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{6}$/.test(s)
-    ? s.replace(/[^A-Za-z0-9-]/g, '').toLowerCase()
-    : '';
+  // Generated public qn ids (LCCCSSSFQQQQ): accept any reasonable casing and
+  // normalise to a stable lowercase form so dedup, sibling-closure and
+  // correction-event idempotency keys stay consistent across the stack.
+  if (/^[A-Za-z0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{6}$/.test(s)) {
+    return s.replace(/[^A-Za-z0-9-]/g, '').toLowerCase();
+  }
+  // Ids as actually published in abhyasapp/content: "<fileId>-<position>",
+  // e.g. "1-VeNFb81ynETihERKfWNUOZSqrYopyOH-1". Every real question uses this
+  // shape and the previous pattern rejected all of them, which stored qid ''
+  // and silently fell back to the position. Case is preserved because the
+  // fileId part is case-sensitive for every other consumer.
+  if (/^[A-Za-z0-9_-]{1,200}-\d{1,5}$/.test(s)) return s;
+  return '';
 }
 
+
+/** Identity of one per-question result inside a progress blob: the stable qid
+    when the client recorded it, the positional uid otherwise. A correction or
+    a reorder renumbers uid but never the qid, so qid is what keeps a
+    question's history together. */
+function qresIdentity(qr: any): { id: string; qid: string; uid: string } | null {
+  const qid = qidString(qr?.qid) || qidString(qr?.qnid) || qidString(qr?.publicId);
+  const uid = String(qr?.uid || '');
+  if (!qid && !uid) return null;
+  return { id: qid || uid, qid, uid };
+}
 
 /* A report made before questions had ids stores only the text the student saw.
    Numbers are decorative (parts get renumbered), so compare the words. */
@@ -52,6 +70,15 @@ function asText(v: unknown, fallback = ''): string {
   return typeof v === 'string' ? v : v == null ? fallback : JSON.stringify(v);
 }
 
+/** Writes an explanation into the field the question already uses. Published
+    content stores it as `explain`; older files use `explanation`/`exp`. Writing
+    a second key would leave the engine showing the old text. */
+function setExplanation(q: any, text: string): void {
+  if (!q || typeof q !== 'object') return;
+  const has = (k: string) => Object.prototype.hasOwnProperty.call(q, k);
+  q[has('explanation') ? 'explanation' : has('explain') ? 'explain' : has('exp') ? 'exp' : 'explanation'] = text;
+}
+
 function reportView(r: Record<string, any>) {
   const qid = qidString(r.qid);
   return {
@@ -78,12 +105,36 @@ function reportView(r: Record<string, any>) {
   };
 }
 
+// Fields a content question may carry its stable id on. `id` holds the internal
+// numeric qid in older files and the public hyphenated qn id in newer ones; the
+// others are accepted so a file that keeps both is never split into two rows.
+const QID_FIELDS = ['id', 'qid', 'qnid', 'publicId', 'publicQid', 'code'];
+
+/** True when a stored id is the wanted one, compared in the canonical form
+    qidString() produces — so the public `A-123-456-789012` matches
+    `a-123-456-789012` instead of falling through to the position. */
+function qidMatches(candidate: unknown, wanted: string): boolean {
+  if (!wanted) return false;
+  const raw = String(candidate == null ? '' : candidate).trim();
+  if (!raw) return false;
+  if (raw === wanted) return true;
+  if (raw.toLowerCase() === wanted.toLowerCase()) return true;
+  const norm = qidString(raw);
+  return !!norm && norm === wanted;
+}
+
+/** Position of a question inside its file, resolved by stable identity:
+    1. the internal qid, 2. the public qn id on any id-bearing field, 3. the
+    position — and only when the caller supplied no id at all. A supplied id
+    that matches nothing returns -1, so a correction can never silently land on
+    whatever question now happens to sit at that position. */
 function questionIndexFor(arr: any[], index: number, qid: string): number {
   if (!qid) return index;
-  const at = arr[index];
-  if (at && String(at.id ?? '') === qid) return index;
-  const found = arr.findIndex(q => String(q?.id ?? '') === qid);
-  return found >= 0 ? found : index;
+  for (const field of QID_FIELDS) {
+    const found = arr.findIndex(q => qidMatches(q?.[field], qid));
+    if (found >= 0) return found;
+  }
+  return -1;
 }
 
 async function correctionExists(dedupeKey: string, correctedAt: string): Promise<boolean> {
@@ -150,7 +201,13 @@ export async function reportquestion(params: Record<string, unknown>) {
   const rlKey = 'rpt:' + auth.username.toLowerCase();
   if (await rlBlocked(rlKey, 40)) return json(RL_TOO_MANY);
 
-  const { data: existing } = await supabase.from('question_reports').select('id').eq('reported_by', auth.username).eq('uid', uid).eq('status', 'open').limit(1);
+  // A question is identified by its stable qid first, the public qn id second:
+  // a report filed after its file was reordered dedupes against the earlier one
+  // even though the position (uid) changed.
+  const qid = qidString(params.qid) || qidString(params.qnid) || qidString(params.publicId) || qidString(params.publicQid);
+
+  const dup = supabase.from('question_reports').select('id').eq('reported_by', auth.username).eq('status', 'open');
+  const { data: existing } = await (qid ? dup.eq('qid', qid) : dup.eq('uid', uid)).limit(1);
   if (existing && existing[0]) return json({ success: true, id: existing[0].id, deduped: true });
 
   const p: Record<string, unknown> = {
@@ -173,7 +230,6 @@ export async function reportquestion(params: Record<string, unknown>) {
   };
 
   const id = 'RPT-' + Date.now().toString(36) + '-' + randId();
-  const qid = qidString(params.qid);
   const fileId = (asStr(p.file_id) || (uid.match(/^(.+)_\d+$/) || [])[1] || '').slice(0, 200);
   // The columns are TEXT NOT NULL DEFAULT '': never send null, and accept "2" as well as 2.
   const idxText = (v: unknown): string => {
@@ -259,14 +315,14 @@ export async function gethardquestions(params: Record<string, unknown>) {
     const { data: cached } = await supabase.from('settings').select('value').eq('key', HARD_CACHE_KEY).limit(1);
     if (cached && cached[0]) {
       const c = JSON.parse(String(cached[0].value || '{}'));
-      if (c && c.map && Date.now() - Number(c.at || 0) < HARD_CACHE_TTL_MS) return json({ success: true, map: c.map, cached: true });
+      if (c && c.map && Date.now() - Number(c.at || 0) < HARD_CACHE_TTL_MS) return json({ success: true, map: c.map, qidMap: c.qidMap || {}, cached: true });
     }
   } catch { /* recompute */ }
 
   let rows: any[];
   try { rows = await selectAll('progress', 'username,data', { orderBy: 'username' }); }
   catch (e) { return json({ success: false, error: dbMsg(e) }); }
-  const tally: Record<string, { n: number; w: number }> = {};
+  const tally: Record<string, { n: number; w: number; qid: string; uid: string }> = {};
   for (const row of rows) {
     const parsed = await readProgress(row.data);   // understands gz1: compressed rows
     const sessions = parsed?.prog?.sessions;
@@ -275,17 +331,27 @@ export async function gethardquestions(params: Record<string, unknown>) {
       const qres = (s as any)?.qres;
       if (!Array.isArray(qres)) continue;
       for (const qr of qres) {
-        const uid = (qr as any)?.uid;
-        if (!uid) continue;
-        const r = tally[uid] || (tally[uid] = { n: 0, w: 0 });
+        const entry = qresIdentity(qr);
+        if (!entry) continue;
+        const r = tally[entry.id] || (tally[entry.id] = { n: 0, w: 0, qid: entry.qid, uid: entry.uid });
+        if (!r.qid) r.qid = entry.qid;
+        if (!r.uid) r.uid = entry.uid;
         r.n++; if (!(qr as any).ok) r.w++;
       }
     }
   }
+  // `map` stays uid-keyed for older clients; `qidMap` is the stable answer.
   const map: Record<string, number> = {};
-  Object.keys(tally).forEach(uid => { const r = tally[uid]; if (r.n >= 20) map[uid] = Math.round((r.w / r.n) * 100); });
-  try { await supabase.from('settings').upsert({ key: HARD_CACHE_KEY, value: JSON.stringify({ at: Date.now(), map }) }, { onConflict: 'key' }); } catch { /* cache is best-effort */ }
-  return json({ success: true, map });
+  const qidMap: Record<string, number> = {};
+  Object.keys(tally).forEach(id => {
+    const r = tally[id];
+    if (r.n < 20) return;
+    const pct = Math.round((r.w / r.n) * 100);
+    if (r.qid) qidMap[r.qid] = pct;
+    if (r.uid) map[r.uid] = pct;
+  });
+  try { await supabase.from('settings').upsert({ key: HARD_CACHE_KEY, value: JSON.stringify({ at: Date.now(), map, qidMap }) }, { onConflict: 'key' }); } catch { /* cache is best-effort */ }
+  return json({ success: true, map, qidMap, cached: false });
 }
 
 export async function adminlistquestionreports(params: Record<string, unknown>) {
@@ -460,7 +526,7 @@ export async function admingetquestion(params: Record<string, unknown>) {
   const at = questionIndexFor(arr, index, qid);
   if (!arr[at]) return json({ success: false, error: 'Question not found in file' });
   const q = arr[at];
-  return json({ success: true, index: at, qid: qid || null, total: arr.length, question: { q: q.q || q.question || '', options: q.options || q.opts || [], correct: q.correct ?? q.answer ?? null, explanation: q.explanation || q.exp || '' } });
+  return json({ success: true, index: at, qid: qid || null, total: arr.length, question: { q: q.q || q.question || '', options: q.options || q.opts || [], correct: q.correct ?? q.answer ?? null, explanation: q.explanation || q.exp || q.explain || '' } });
 }
 
 export async function adminupdatequestion(params: Record<string, unknown>) {
@@ -532,7 +598,7 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
       question: String(fields.q || ''),
       options: Array.isArray(fields.options) ? fields.options.map(String) : [],
       correctIndex: Number.isInteger(fields.correct) ? fields.correct : null,
-      explanation: String(fields.explanation || ''),
+      explanation: String(fields.explanation ?? fields.explain ?? ''),
     };
     if (!after.question.trim()) return json({ success: false, error: 'Question text is required.' });
     const invalid = validateCorrection(after, beforeEdit);
@@ -557,7 +623,7 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
     arr[at].q = after.question;
     if (after.options.length) arr[at].options = after.options;
     if (after.correctIndex !== null) arr[at].correct = after.correctIndex;
-    arr[at].explanation = after.explanation;
+    setExplanation(arr[at], after.explanation);
     // Only subjective files live in Supabase Storage and can be written back.
     // Objective/Drive-backed files are corrected through the event log + pipeline
     // (which re-exports from Neon), so no file write is needed there.
@@ -702,7 +768,7 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
         q.q = cleanAfter.question;
         if (cleanAfter.options.length) q.options = cleanAfter.options;
         if (cleanAfter.correctIndex !== null) q.correct = cleanAfter.correctIndex;
-        q.explanation = cleanAfter.explanation;
+        setExplanation(q, cleanAfter.explanation);
       };
 
       const editUid = qid ? `q${qid}` : (uid || `${fileId}_${at}`);
@@ -1138,27 +1204,34 @@ export async function adminmostmissedquestions(params: Record<string, unknown>) 
   const minAttempts = Math.max(1, Number(params.minAttempts) || 3);
 
   const rows = await selectAll('progress', 'username,data', { orderBy: 'username' });
-  // FIX BUG-08: track unique usernames per uid instead of hardcoding 1.
-  const tally: Record<string, { n: number; w: number; users: Set<string> }> = {};
+  // FIX BUG-08: track unique usernames per question instead of hardcoding 1.
+  // Identity is the stable qid when the client recorded one, else the
+  // positional uid, so the same question is not split across two rows after
+  // its file is reordered or corrected.
+  const tally: Record<string, { n: number; w: number; users: Set<string>; qid: string; uid: string }> = {};
   for (const row of rows) {
     const user = String(row.username || '');
     const parsed = await readProgress(row.data);   // understands gz1: compressed rows
     const sessions = Array.isArray(parsed?.prog?.sessions) ? parsed.prog.sessions : [];
     sessions.forEach((s: any) => {
       (s?.qres || []).forEach((qr: any) => {
-        if (!qr.uid) return;
-        const r = tally[qr.uid] || (tally[qr.uid] = { n: 0, w: 0, users: new Set() });
+        const entry = qresIdentity(qr);
+        if (!entry) return;
+        const r = tally[entry.id] || (tally[entry.id] = { n: 0, w: 0, users: new Set(), qid: entry.qid, uid: entry.uid });
+        if (!r.qid) r.qid = entry.qid;
+        if (!r.uid) r.uid = entry.uid;
         r.n++; if (!qr.ok) r.w++;
         if (user) r.users.add(user);
       });
     });
   }
 
-  const results = Object.keys(tally).map(uid => {
-    const r = tally[uid]; const fileId = uid.replace(/_\d+$/, '');
+  const results = Object.keys(tally).map(id => {
+    const r = tally[id];
+    const fileId = r.uid ? r.uid.replace(/_\d+$/, '') : '';
     return {
-      uid, fileId,
-      index: Number(String(uid).split('_').pop()),
+      id, qid: r.qid || '', uid: r.uid || '', fileId,
+      index: r.uid && /_\d+$/.test(r.uid) ? Number(r.uid.split('_').pop()) : null,
       wrong: r.w, total: r.n,
       wrongRate: Math.round((r.w / r.n) * 100),
       accuracy: Math.round(((r.n - r.w) / r.n) * 100),

@@ -3445,7 +3445,10 @@ function isContentFileAllowed_(fileId, isAdmin) {
   return false;
 }
 
-const _ANSWER_KEYS = ["correct", "correctIndex", "answer", "ans", "Answer", "explanation", "exp"];
+/* `explain` is what the published content files use for the explanation; the
+   others are older spellings. Missing it shipped explanations during a weekly
+   exam window. */
+const _ANSWER_KEYS = ["correct", "correctIndex", "answer", "ans", "Answer", "explanation", "exp", "explain"];
 
 function _stripQuestion_(q) {
   if (!q || typeof q !== "object" || Array.isArray(q)) return q;

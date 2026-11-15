@@ -116,9 +116,41 @@ function findQReportRow_(sheet, id) { return id ? _findRowFast_(sheet, 1, id) : 
 function normalizeQReportQid_(v) {
   const s = String(v == null ? "" : v).trim();
   if (/^\d+$/.test(s)) return s;
-  return /^[A-Za-z0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{6}$/.test(s)
-    ? s.replace(/[^A-Za-z0-9-]/g, "").toLowerCase()
-    : "";
+  if (/^[A-Za-z0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{6}$/.test(s)) {
+    return s.replace(/[^A-Za-z0-9-]/g, "").toLowerCase();
+  }
+  /* Ids as actually published in abhyasapp/content: "<fileId>-<position>",
+     e.g. "1-VeNFb81ynETihERKfWNUOZSqrYopyOH-1". The old pattern rejected every
+     one of them, so qid was stored as "". Case is preserved: the fileId part
+     is case-sensitive for every other consumer. */
+  if (/^[A-Za-z0-9_-]{1,200}-\d{1,5}$/.test(s)) return s;
+  return "";
+}
+
+/* Fields a content question may carry its stable id on, and the lookup order:
+   internal qid first, then the public qn id on any of these keys, then the
+   position - only when no id was supplied at all. Mirrors questionIndexFor()
+   in the Supabase Edge Function so both backends resolve a question the same
+   way. Returns -1 when an id was supplied but matches nothing. */
+const QREPORT_QID_FIELDS = ["id", "qid", "qnid", "publicId", "publicQid", "code"];
+function qidMatchesGas_(candidate, wanted) {
+  if (!wanted) return false;
+  const raw = String(candidate == null ? "" : candidate).trim();
+  if (!raw) return false;
+  if (raw === wanted) return true;
+  if (raw.toLowerCase() === wanted.toLowerCase()) return true;
+  const norm = normalizeQReportQid_(raw);
+  return !!norm && norm === wanted;
+}
+function questionIndexForId_(arr, index, qid) {
+  if (!qid) return index;
+  for (let f = 0; f < QREPORT_QID_FIELDS.length; f++) {
+    const field = QREPORT_QID_FIELDS[f];
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] && qidMatchesGas_(arr[i][field], qid)) return i;
+    }
+  }
+  return -1;
 }
 
 /* ── Row → object. Parses the correctedSnapshot column (index 17). ── */
@@ -501,38 +533,44 @@ function adminGetQuestion(p) {
   if (!chk.ok) return { success: false, error: chk.error };
   const fileId = String(p.fileId || "").trim();
   const index = Number(p.index);
+  const qid = normalizeQReportQid_(p.qid);
   if (!/^[A-Za-z0-9_-]{10,200}$/.test(fileId) || !(index >= 0)) {
     return { success: false, error: "Invalid question reference." };
   }
   const cache = CacheService.getScriptCache();
-  const cacheKey = "aq_" + fileId + "_" + index;
+  const cacheKey = "aq_" + fileId + "_" + index + (qid ? "_" + qid : "");
   try {
     const cached = cache.get(cacheKey);
     if (cached) {
       const hit = JSON.parse(cached);
       if (hit && hit.question) {
-        return { success: true, index: index, total: hit.total, question: hit.question, cached: true };
+        return { success: true, index: hit.at, qid: qid || null, total: hit.total, question: hit.question, cached: true };
       }
     }
   } catch (e) {}
   const res = readJsonFileById_(fileId);
   if (!res.success) return res;
   const arr = _questionArray_(res.result);
-  if (!arr || !arr[index] || typeof arr[index] !== "object") {
+  if (!arr) return { success: false, error: "That question was not found in the file." };
+  const at = questionIndexForId_(arr, index, qid);
+  if (at < 0) {
+    return { success: false, error: "That question is no longer in the file - reopen the report." };
+  }
+  if (!arr[at] || typeof arr[at] !== "object") {
     return { success: false, error: "That question was not found in the file." };
   }
-  const view = _questionView_(arr[index]);
+  const view = _questionView_(arr[at]);
   if (!view.keys.text || !view.keys.options || view.options.length < 2) {
     return { success: false, error: "This question uses a format the editor cannot change. Edit the JSON file in Drive instead." };
   }
   const out = {
-    success: true, index: index, total: arr.length,
+    success: true, index: at, qid: qid || null, total: arr.length,
     question: {
       q: view.q, options: view.options,
       correct: view.correct, explanation: view.explanation
     }
   };
-  try { cache.put(cacheKey, JSON.stringify({ total: out.total, question: out.question }), 120); } catch (e) {}
+  try { cache.put(cacheKey, JSON.stringify({ at: out.index, total: out.total, question: out.question }), 120); } catch (e) {}
   return out;
 }
 
@@ -544,6 +582,7 @@ function adminUpdateQuestion(p) {
   const fileId = String(p.fileId || "").trim();
   const index = Number(p.index);
   const expected = String(p.expectedQ || "").trim();
+  const qid = normalizeQReportQid_(p.qid);
   if (!/^[A-Za-z0-9_-]{10,200}$/.test(fileId) || !(index >= 0)) {
     return { success: false, error: "Invalid question reference." };
   }
@@ -583,16 +622,23 @@ function adminUpdateQuestion(p) {
     try { raw = JSON.parse(file.getBlob().getDataAsString("UTF-8")); }
     catch (e) { return { success: false, error: "The question file is not valid JSON." }; }
     const arr = _questionArray_(raw);
-    if (!arr || !arr[index] || typeof arr[index] !== "object") {
+    if (!arr) return { success: false, error: "That question was not found in the file." };
+    const at = questionIndexForId_(arr, index, qid);
+    if (at < 0) {
+      return { success: false, error: "That question is no longer in the file - reopen the report." };
+    }
+    if (!arr[at] || typeof arr[at] !== "object") {
       return { success: false, error: "That question was not found in the file." };
     }
 
-    const q = arr[index];
+    const q = arr[at];
     const view = _questionView_(q);
     if (!view.keys.text || !view.keys.options) {
       return { success: false, error: "This question uses a format the editor cannot change." };
     }
-    if (view.q.trim() !== expected) {
+    /* A valid qid located the question, so position/text drift is not a
+       conflict; only legacy (qid-less) edits use the text guard. */
+    if (!qid && view.q.trim() !== expected) {
       return {
         success: false,
         error: "The file changed since you opened it. Close this and open the report again."

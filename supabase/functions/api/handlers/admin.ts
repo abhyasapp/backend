@@ -244,6 +244,8 @@ export async function admingetstudentoverview(params: Record<string, unknown>) {
         id: r.id,
         status: r.status,
         reason: r.reason,
+        qid: String(r.qid || ''),
+        uid: String(r.uid || ''),
         questionSnapshot: r.question_snapshot,
         reportedAt: r.reported_at,
       })),

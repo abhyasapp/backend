@@ -42,7 +42,9 @@ export function toMs(v: unknown): number {
   return isNaN(t) ? 0 : t;
 }
 
-const ANSWER_KEYS = ["correct", "correctIndex", "answer", "ans", "Answer", "explanation", "exp"];
+// `explain` is what the published content files use for the explanation; the
+// others are older spellings. Missing it leaked the reason during exam windows.
+const ANSWER_KEYS = ["correct", "correctIndex", "answer", "ans", "Answer", "explanation", "exp", "explain"];
 const OPTION_FLAGS = ["correct", "isCorrect"];
 
 function stripQuestion(q: unknown): unknown {

@@ -61,6 +61,9 @@ test("stripAnswers removes keys in every supported shape", () => {
     assert.ok(!json.includes("because"), json);
     assert.ok(json.includes("Q?"), json);
   }
+  // Published content stores the explanation as `explain` — it must be stripped too.
+  const withExplain = JSON.stringify(stripAnswers([{ q: "y", options: ["a", "b"], correct: 0, explain: "secret why" }]));
+  assert.ok(!withExplain.includes("secret why"), withExplain);
   const withFlags = JSON.stringify(stripAnswers([{ q: "x", options: [{ text: "a", isCorrect: true }] }]));
   assert.ok(!withFlags.includes("isCorrect"));
   // original untouched
