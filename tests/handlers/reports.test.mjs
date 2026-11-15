@@ -39,7 +39,7 @@ ok('reports store qid and return reportId');
 r = await call(R.myquestionreports, { username: 'sita', token: 'user-token' });
 assert.equal(r.success, true);
 assert.equal(r.reports.length, 1);
-assert.equal(r.reports[0].qid, 48213);
+assert.equal(r.reports[0].qid, '48213');
 assert.equal(r.reports[0].status, 'open');
 ok('myQuestionReports is scoped to the session user and exposes qid');
 
@@ -78,10 +78,10 @@ r = await call(R.adminlistcorrectionevents, {
 assert.equal(r.success, true);
 assert.equal(r.events.length, 2);
 const byQid = Object.fromEntries(r.events.map(e => [e.qid, e]));
-assert.equal(byQid[48214].fileId, 'fileA');
-assert.equal(byQid[48214].admin, 'admin');
-assert.equal(byQid[48214].before.question, '14. Other stem');
-assert.equal(byQid[48214].after.question, '14. Better stem');
+assert.equal(byQid['48214'].fileId, 'fileA');
+assert.equal(byQid['48214'].admin, 'admin');
+assert.equal(byQid['48214'].before.question, '14. Other stem');
+assert.equal(byQid['48214'].after.question, '14. Better stem');
 ok('adminListCorrectionEvents returns the full event audit trail');
 
 r = await call(R.adminlistcorrectionevents, {
@@ -89,7 +89,7 @@ r = await call(R.adminlistcorrectionevents, {
 });
 assert.equal(r.success, true);
 assert.equal(r.events.length, 1);
-assert.equal(r.events[0].qid, 48213);
+assert.equal(r.events[0].qid, '48213');
 ok('adminListCorrectionEvents can filter by stable qid');
 
 r = await call(R.adminlistcorrectionevents, {
@@ -110,7 +110,7 @@ assert.equal(r.success, true);
 assert.equal(r.scanned, 1);
 assert.equal(r.matched, 1);
 assert.equal(r.applied, 0);
-assert.equal(r.examples[0].qid, 48214);
+assert.equal(r.examples[0].qid, '48214');
 assert.equal(DB.tables.question_reports.find(x => x.id === 'legacy-1').qid, '');
 ok('the qid backfill previews a unique text match without writing');
 
@@ -144,7 +144,7 @@ globalThis.fetch = nativeFetch;
 assert.equal(r.success, true);
 assert.equal(r.matched, 1);
 assert.equal(r.noFile, 0);
-assert.equal(r.examples[0].qid, 777);
+assert.equal(r.examples[0].qid, '777');
 ok('the qid backfill falls back to the CDN for Drive-backed chapter files');
 
 r = await call(R.adminapplycorrections, {
@@ -176,8 +176,8 @@ ok('a stale expectedQ is refused without changing the file');
 r = await call(R.synccorrectionssince, { key: 'pipeline-test-key', since: 0, limit: 500 });
 assert.equal(r.success, true);
 assert.equal(r.count, 2);
-assert.equal(r.corrections[0].qid, 48213);
-assert.equal(r.corrections[1].qid, 48214);
+assert.equal(r.corrections[0].qid, '48213');
+assert.equal(r.corrections[1].qid, '48214');
 assert.equal(r.corrections[0].after.question, '13. New stem');
 ok('syncCorrectionsSince emits qid-bearing events for Drive -> Neon');
 
@@ -210,5 +210,43 @@ assert.equal(reviewed.corrected, false);
 assert.equal(r.correctedMine.some(x => x.uid === 'fileA_1'), false);
 assert.equal(r.correctedMine.some(x => x.uid === 'fileA_0'), true);
 ok('a no-change resolution is not reported to the student as a correction');
+
+// A hyphenated public qid cannot survive Number(): it becomes NaN, and JSON
+// writes NaN as null, so the pipeline used to receive a correction with no id.
+// Every response must carry the canonical lowercase string instead.
+const hyphenQid = 'a-123-456-789012';
+DB.storage['subjective-content/fileB'] = JSON.stringify({
+  questions: [{ id: hyphenQid, q: '16. Hyphenated stem', options: ['p', 'q'], correct: 0, explanation: '' }],
+});
+r = await call(R.reportquestion, {
+  username: 'sita', token: 'user-token', uid: 'fileB_0', qid: hyphenQid,
+  reason: 'typo', note: 'id check', questionSnapshot: '16. Hyphenated stem',
+  optionsSnapshot: ['p', 'q'], correctIndex: 0, chosenIndex: 1,
+});
+assert.equal(r.success, true);
+assert.equal(DB.tables.question_reports.find(x => x.uid === 'fileB_0').qid, hyphenQid);
+r = await call(R.myquestionreports, { username: 'sita', token: 'user-token' });
+assert.equal(r.reports.find(x => x.uid === 'fileB_0').qid, hyphenQid);
+r = await call(R.adminapplycorrections, {
+  username: 'admin', token: 'admin-token',
+  items: JSON.stringify([{
+    key: 'q' + hyphenQid, uid: 'fileB_0', qid: hyphenQid, fileId: 'fileB', index: 0,
+    correctedAt: '2026-11-14T11:00:00.000Z', expectedQ: '16. Hyphenated stem',
+    after: { question: '16. Hyphenated fixed', options: ['p', 'q'], correctIndex: 1 },
+    closeReport: true,
+  }]),
+});
+assert.equal(r.success, true);
+assert.equal(r.results[0].ok, true);
+r = await call(R.adminlistcorrectionevents, {
+  username: 'admin', token: 'admin-token', fileId: 'fileB', qid: hyphenQid,
+});
+assert.equal(r.events.length, 1);
+assert.equal(r.events[0].qid, hyphenQid);
+r = await call(R.synccorrectionssince, { key: 'pipeline-test-key', since: 0, limit: 500 });
+const hyphenSynced = r.corrections.filter(c => c.fileId === 'fileB');
+assert.equal(hyphenSynced.length, 1);
+assert.equal(hyphenSynced[0].qid, hyphenQid);
+ok('a hyphenated qid survives reports, correction events and the correction sync');
 
 console.log(`\nALL ${n} REPORT/CORRECTION CHECKS PASSED`);

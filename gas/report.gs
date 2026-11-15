@@ -108,6 +108,19 @@ function getQReportsSheet_() {
 }
 function findQReportRow_(sheet, id) { return id ? _findRowFast_(sheet, 1, id) : null; }
 
+/* A public question id is either a legacy numeric id ("48213") or a
+   hyphenated one ("a-123-456-789012"). It is stored, compared and returned as
+   the canonical lowercase STRING: a hyphenated id cannot survive Number(),
+   which yields NaN and turns every such correction into qid null. Mirrors
+   qidString() in the Supabase Edge Function so both backends agree. */
+function normalizeQReportQid_(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (/^\d+$/.test(s)) return s;
+  return /^[A-Za-z0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{6}$/.test(s)
+    ? s.replace(/[^A-Za-z0-9-]/g, "").toLowerCase()
+    : "";
+}
+
 /* ── Row → object. Parses the correctedSnapshot column (index 17). ── */
 function rowToQReport_(row) {
   const uid = String(row[1] || "");
@@ -125,7 +138,7 @@ function rowToQReport_(row) {
   return {
     id: row[0] || "",
     uid: uid,
-    qid: row.length > 18 && String(row[18] || "").match(/^\d+$/) ? Number(row[18]) : null,
+    qid: row.length > 18 ? (normalizeQReportQid_(row[18]) || null) : null,
     fileId: row[2] || "",
     questionNumber: m ? Number(m[2]) + 1 : null,
     questionSnapshot: row[3] || "",
@@ -173,7 +186,7 @@ function normalizeReportPayload_(p) {
     ? String(p.section) : "other";
   return { value: {
     uid: uid,
-    qid: String(p.qid || "").match(/^\d+$/) ? String(p.qid) : "",
+    qid: normalizeQReportQid_(p.qid),
     fileId: m ? m[1] : uid,
     reason: reason,
     note: sanitizeSheetField_(String(p.note || "").trim().slice(0, 500)),
@@ -266,7 +279,7 @@ function reportQuestion(p) {
     const sheet = getQReportsSheet_();
     const data = sheet.getDataRange().getValues();
     for (let i = 1; i < data.length; i++) {
-      if ((String(data[i][1]) === r.uid || (r.qid && String(data[i][18] || "") === r.qid)) &&
+      if ((String(data[i][1]) === r.uid || (r.qid && normalizeQReportQid_(data[i][18]) === r.qid)) &&
           String(data[i][6]) === username &&
           String(data[i][8]) === "open") {
         return { success: true, message: "You've already reported this question \u2014 it's in the queue." };
@@ -348,10 +361,10 @@ function adminUpdateQuestionReportStatus(p) {
     if (status === "resolved") {
       const data = sheet.getDataRange().getValues();
       const uid = String(found.row[1] || "");
-      const qid = String(found.row[18] || "");
+      const qid = normalizeQReportQid_(found.row[18]);
       for (let i = 1; i < data.length; i++) {
         if (i + 1 === found.rowIndex) continue;
-        if ((String(data[i][1]) === uid || (qid && String(data[i][18] || "") === qid)) &&
+        if ((String(data[i][1]) === uid || (qid && normalizeQReportQid_(data[i][18]) === qid)) &&
             String(data[i][8]) === "open") {
           sheet.getRange(i + 1, 9).setValue("resolved");
           sheet.getRange(i + 1, 15, 1, 3).setValues([stamp]);

@@ -1,4 +1,20 @@
-# Changes (v1.64 Supabase · v1.45 Apps Script)
+# Changes (v1.67 Supabase · v1.45 Apps Script)
+
+## 15 November 2026 — qid is a string end to end
+- `qid` is the canonical lowercase **string** in every response (`qidString()`
+  form: `48213` or `a-123-456-789012`). Report, question, correction-event,
+  export and correction-sync payloads now agree.
+- The remaining `Number(qid)` coercions turned every hyphenated id into `NaN`,
+  which JSON writes as `null` — so a hyphenated correction reached the
+  Drive → Neon pipeline with `qid: null`, and `adminGetQuestion` /
+  `adminUpdateQuestion` echoed it the same way.
+- Apps Script `report.gs` accepts and preserves hyphenated qids instead of
+  dropping anything that is not numeric (`normalizeQReportQid_`), including in
+  the sheet round-trip and the sibling-report comparisons.
+- The handler and GAS contract tests assert the string form and cover a
+  hyphenated qid through report → correction event → `syncCorrectionsSince`.
+- `HANDOVER.md` / `NEXT-SESSION.md` version references follow
+  `FUNCTION_VERSION` (1.67); their 1.64 live-state notes are history.
 
 ## 14 November 2026 — integrity and access hardening
 - Fail-closed trial access, rejected-session enforcement, reserved-name checks and
@@ -84,5 +100,5 @@ non-zero exit on any failure · workflow every 6 h with concurrency lock and a d
 ## Verification
 `npm test` → 16 sync tests, a mocked-sheet harness for `sync.gs`, and 12 behaviour checks that execute
 the real TypeScript handlers against an in-memory database (first login, forced change, owner-only rules,
-last-owner protection, temp-password reset, audit log, `getfile` contract). `tsc --strict` type-check passes.
+last-owner protection, temp-password reset, audit log, `getfile` contract). There is no `tsc`/`deno check` gate: the repo ships no `tsconfig.json` or `deno.json`, and CI's type-check job is `continue-on-error`, so it is advisory only.
 **Not** verified: a live Supabase / Apps Script deployment — run the smoke test in `README.md`.

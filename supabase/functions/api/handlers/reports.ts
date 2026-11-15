@@ -57,7 +57,7 @@ function reportView(r: Record<string, any>) {
   return {
     id: r.id,
     uid: r.uid,
-    qid: qid ? Number(qid) : null,
+    qid: qid || null,
     fileId: r.file_id,
     questionSnapshot: r.question_snapshot,
     reason: r.reason,
@@ -460,7 +460,7 @@ export async function admingetquestion(params: Record<string, unknown>) {
   const at = questionIndexFor(arr, index, qid);
   if (!arr[at]) return json({ success: false, error: 'Question not found in file' });
   const q = arr[at];
-  return json({ success: true, index: at, qid: qid ? Number(qid) : null, total: arr.length, question: { q: q.q || q.question || '', options: q.options || q.opts || [], correct: q.correct ?? q.answer ?? null, explanation: q.explanation || q.exp || '' } });
+  return json({ success: true, index: at, qid: qid || null, total: arr.length, question: { q: q.q || q.question || '', options: q.options || q.opts || [], correct: q.correct ?? q.answer ?? null, explanation: q.explanation || q.exp || '' } });
 }
 
 export async function adminupdatequestion(params: Record<string, unknown>) {
@@ -481,7 +481,7 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
   const dedupeKey = qid ? `q${qid}` : `u${reportUid}`;
   const editUid = qid ? `q${qid}` : reportUid;
   if (await correctionExists(dedupeKey, correctedAt)) {
-    return json({ success: true, duplicate: true, qid: qid ? Number(qid) : null });
+    return json({ success: true, duplicate: true, qid: qid || null });
   }
 
   // Load the file from Supabase Storage (subjective) or the CONTENT CDN
@@ -592,7 +592,7 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
       reportId: String(params.reportId || ''), qid, uid: reportUid,
       admin: admin.username, at: correctedAt, after, close: params.closeReport !== false,
     });
-    return json({ success: true, qid: qid ? Number(qid) : null, alsoClosed });
+    return json({ success: true, qid: qid || null, alsoClosed });
   } catch (e) { return json({ success: false, error: 'Could not save: ' + String(e) }); }
 }
 
@@ -834,7 +834,7 @@ export async function syncreportssince(params: Record<string, unknown>) {
     out.push({
       id: r.id,
       uid: r.uid,
-      qid: qid ? Number(qid) : null,
+      qid: qid || null,
       fileId: r.file_id,
       questionSnapshot: r.question_snapshot,
       optionsSnapshot: r.options_snapshot,
@@ -902,7 +902,7 @@ export async function synccorrectionssince(params: Record<string, unknown>) {
     const qid = qidString(ev.qid);
     const entry = {
       uid: String(ev.uid || ev.dedupe_key),
-      qid: qid ? Number(qid) : null,
+      qid: qid || null,
       correctedAt: new Date(atMs).toISOString(),
       fileId: ev.file_id,
       questionIndex: m ? Number(m[2]) : null,
@@ -1098,7 +1098,7 @@ export async function adminbackfillreportqids(params: Record<string, unknown>) {
     if (!qid) { noQuestionId++; continue; }
     matched++;
     if (examples.length < 10) {
-      examples.push({ reportId: r.id, qid: Number(qid), text: String(snapshot).slice(0, 120) });
+      examples.push({ reportId: r.id, qid: qid, text: String(snapshot).slice(0, 120) });
     }
     if (apply) {
       const { error } = await supabase.from('question_reports').update({ qid }).eq('id', r.id);

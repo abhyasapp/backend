@@ -1,6 +1,6 @@
 # Abhyas Backend — Handover
 
-**Updated:** 14 November 2026
+**Updated:** 15 November 2026
 **Canonical repo:** `D:\CODERSCODE\abhyas-backend`
 **Remote:** `https://github.com/abhyasapp/backend.git`
 **Live API:** `https://kdysjiiefvxnkrykgykz.supabase.co/functions/v1/api`
@@ -26,11 +26,12 @@
 - A second hardening pass adds fail-closed access, paged PostgREST reads,
   exact Storage lookup, weekly answer hiding, atomic rate limiting and the
   `20261115000000_integrity_hardening.sql` migration. It is applied live and
-  the API function is deployed as **1.64** (14 November 2026).
+  the API function's code is **1.67**; `?action=health` reports whatever version
+  is actually deployed.
 
 ## Verify the live state
 
-1. `GET ?action=health` returns `"version":"1.64"`.
+1. `GET ?action=health` returns the deployed `version` (`1.67` once the current code is deployed).
 2. `supabase migration list --linked` shows `20261115000000` on both sides.
 3. `GET ?action=getsettings` does not contain `adminEmail`.
 4. An unauthenticated `synccorrectionssince` POST returns 401.

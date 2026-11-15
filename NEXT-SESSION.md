@@ -1,5 +1,9 @@
 # Next-session handoff — 14 November 2026
 
+> The live-state section below was recorded against API **1.64**. `_shared/config.ts`
+> is now `FUNCTION_VERSION = '1.67'`, so treat those 1.64 lines as history and
+> re-check `?action=health` before trusting a deployed version number.
+
 Use this file when moving the work to a new chat or project. A chat itself cannot
 be transferred, but this captures the exact state and the first commands.
 
@@ -53,9 +57,9 @@ hops before falling back to the old text/identity matcher.
 - Apps Script fixes for gzip progress, authenticated hard-question stats,
   weekly answer hiding, reset URL, `adminEmail`, POST-only correction sync and
   the optional `LEGACY_API=off` switch.
-- API version **1.64** is deployed live.
+- API **1.64** was live on 14 November; the code has since moved to **1.67** (`_shared/config.ts`). Confirm with `?action=health`.
 - Migration `20261115000000_integrity_hardening.sql` is applied live.
-- Live checks: `action=health` returns 1.64; unique indexes exist; public
+- Live checks (at the time): `action=health` returned 1.64; unique indexes exist; public
   `getsettings` omits `adminEmail`; unauthenticated correction sync returns 401.
 
 ## Verification already run
@@ -67,8 +71,8 @@ cd /d/CODERSCODE/abhyas-backend
 npm run verify
 ```
 
-Passed: 26 schema/sync/header tests, GAS harness, 12 owner/admin checks,
-4 Student 360 checks, 7 report/correction checks.
+Passed: the schema/sync/header suites, the GAS harness, and the owner/admin,
+Student 360 and report/correction handler suites.
 
 Pipeline:
 

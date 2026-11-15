@@ -55,7 +55,7 @@ console.log('GAS sync harness: all assertions passed');
     row({ id:'R2', uid:'FA_50', fileId:'FA', q:'trim B', options:['a','b'], resolvedAt:'2026-10-31T09:20:00Z',
       snapshot:{ uid:'corr_a1', at:'2026-10-31T09:12:44Z', before:{ question:'x', options:[] },
         after:{ question:'dup', options:['a','b'], correctIndex:0 } } }),
-    row({ id:'R3', uid:'FB_7', fileId:'FB', q:'legacy', options:['yes','no'], resolvedAt:'2026-10-31T10:00:00Z',
+    row({ id:'R3', uid:'FB_7', fileId:'FB', q:'legacy', options:['yes','no'], qid:'a-123-456-789012', resolvedAt:'2026-10-31T10:00:00Z',
       snapshot:{ q:'Legacy after', options:['yes','no'], correct:1, explanation:'' } })
   ];
   var cctx = vm.createContext({
@@ -93,11 +93,13 @@ console.log('GAS sync harness: all assertions passed');
   assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(c.correctedAt), 'correctedAt must be ISO-8601');
   assert.equal(c.after.correctIndex, 1);
   assert.equal(c.before.options.length, 4);
-  assert.equal(c.qid, 48213);
+  assert.equal(c.qid, '48213');
 
   var legacy = p2.corrections.filter(function (x) { return x.uid === 'R3'; })[0];
   assert.equal(legacy.after.correctIndex, 1);
   assert.equal(legacy.after.question, 'Legacy after');
+  // A hyphenated qid must survive the sheet round-trip as a string, not null.
+  assert.equal(legacy.qid, 'a-123-456-789012');
 
   console.log('GAS correction-sync contract: all assertions passed');
 })();
