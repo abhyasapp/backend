@@ -331,4 +331,31 @@ assert.equal(byId['fileA_2'].qid, '');
 assert.equal(byId['fileA_2'].fileId, 'fileA');
 ok('most-missed questions merge a question by qid across positions');
 
+// The pipeline publishes public qn ids that carry letters and a dot
+// ("G0011.110001" for General Knowledge, "5002mixedqn10001" for a word
+// subtopic). These were rejected by the old pattern, so such a report lost its
+// qid and fell back to the position. They must be stored, lowercased.
+DB.storage['subjective-content/fileD'] = JSON.stringify({
+  questions: [{ id: 'G0011.110001', q: '1. GK stem', options: ['a', 'b'], correct: 0 }],
+});
+r = await call(R.reportquestion, {
+  username: 'sita', token: 'user-token', uid: 'fileD_0', qid: 'G0011.110001',
+  reason: 'typo', note: '', questionSnapshot: '1. GK stem',
+});
+assert.equal(r.success, true);
+const gkRows = DB.tables.question_reports.filter(x => x.qid === 'g0011.110001');
+assert.equal(gkRows.length, 1, 'a dotted public qn id is stored, lowercased');
+assert.equal(gkRows[0].file_id, 'fileD');
+ok('a published dotted public qn id is stored instead of the position');
+
+r = await call(R.reportquestion, {
+  username: 'sita', token: 'user-token', uid: 'fileD_0', qid: '5002mixedqn10001',
+  reason: 'typo', note: '', questionSnapshot: '1. GK stem',
+});
+assert.equal(r.success, true);
+assert.equal(
+  DB.tables.question_reports.some(x => x.qid === '5002mixedqn10001'), true,
+  'a word-subtopic public qn id is stored too');
+ok('a published word-subtopic public qn id is stored');
+
 console.log(`\nALL ${n} REPORT/CORRECTION CHECKS PASSED`);

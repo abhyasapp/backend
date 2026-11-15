@@ -109,6 +109,13 @@ console.log('GAS sync harness: all assertions passed');
   assert.equal(normQid(48213), '48213');
   assert.equal(normQid('a-123-456-789012'), 'a-123-456-789012');
   assert.equal(normQid('nonsense'), '');
+  // Public qn ids as the pipeline actually publishes them: dotted, letter
+  // prefixed and word subtopics. These used to normalise to "" so the report
+  // fell back to the stale position.
+  assert.equal(normQid('G0011.110001'), 'g0011.110001');
+  assert.equal(normQid('50011.110001'), '50011.110001');
+  assert.equal(normQid('5002mixedqn10001'), '5002mixedqn10001');
+  assert.equal(normQid('g0011.110001'), 'g0011.110001');
   var indexFor = vm.runInContext('questionIndexForId_', cctx);
   var arrQ = [{ id: 'X-1' }, { id: '1-VeNF-2' }, { q: 'no id here' }];
   assert.equal(indexFor(arrQ, 9, '1-VeNF-2'), 1, 'must resolve by id, ignoring the stale position');

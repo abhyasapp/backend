@@ -124,6 +124,14 @@ function normalizeQReportQid_(v) {
      one of them, so qid was stored as "". Case is preserved: the fileId part
      is case-sensitive for every other consumer. */
   if (/^[A-Za-z0-9_-]{1,200}-\d{1,5}$/.test(s)) return s;
+  /* The public qn id the pipeline writes to public_qn: level token, chapter,
+     subtopic and sequence, either dotted ("50011.110001", "G0011.110001") or
+     flat, the only shape that can carry a word subtopic ("5002mixedqn10001").
+     Both were rejected before, so such a question fell back to its position.
+     Lowercased like every other public id. */
+  if (/^[A-Za-z0-9][A-Za-z0-9._]{3,63}$/.test(s) && /\d/.test(s)) {
+    return s.toLowerCase();
+  }
   return "";
 }
 
