@@ -162,7 +162,7 @@ ok('a retry with the same correctedAt is idempotent');
 r = await call(R.adminapplycorrections, {
   username: 'admin', token: 'admin-token',
   items: JSON.stringify([{
-    key: 'q48213', uid: 'fileA_0', qid: 48213, fileId: 'fileA', index: 0,
+    key: 'q48213', uid: 'fileA_0', qid: null, fileId: 'fileA', index: 0,
     correctedAt: '2026-11-14T10:05:00.000Z', expectedQ: 'Stale text',
     after: { question: 'Should not save', options: ['a', 'b'], correctIndex: 1 },
   }]),

@@ -429,16 +429,31 @@ export async function admingetquestion(params: Record<string, unknown>) {
   const qid = qidString(params.qid);
   if (!fileId || isNaN(index) || index < 0) return json({ success: false, error: 'Invalid reference' });
 
+  // Load the file from Supabase Storage first (subjective files), then fall
+  // back to the public CONTENT CDN for objective/Drive-backed files. When a
+  // qid is present the question is located by id, so position is never
+  // trusted — the same position may hold a different question after a reorder.
+  let arr: any[] | null = null;
+  let raw: any = null;
   try {
     const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
-    if (error || !blob) throw new Error('File not found');
-    const raw = JSON.parse(await blob.text());
-    const arr = flattenQuestions(raw);
-    const at = questionIndexFor(arr, index, qid);
-    if (!arr[at]) return json({ success: false, error: 'Question not found in file' });
-    const q = arr[at];
-    return json({ success: true, index: at, qid: qid ? Number(qid) : null, total: arr.length, question: { q: q.q || q.question || '', options: q.options || q.opts || [], correct: q.correct ?? q.answer ?? null, explanation: q.explanation || q.exp || '' } });
-  } catch (e) { return json({ success: false, error: 'Could not read file: ' + String(e) }); }
+    if (error || !blob) throw new Error('not in storage');
+    raw = JSON.parse(await blob.text());
+    arr = flattenQuestions(raw);
+  } catch {
+    if (/^[A-Za-z0-9_-]+$/.test(fileId)) {
+      const base = (Deno.env.get('CONTENT_CDN_BASE') || 'https://cdn.jsdelivr.net/gh/abhyasapp/content@main').replace(/\/+$/, '');
+      try {
+        const res = await fetch(`${base}/content/${encodeURIComponent(fileId)}.json`, { signal: AbortSignal.timeout(10000) });
+        if (res.ok) { raw = await res.json(); arr = flattenQuestions(raw); }
+      } catch { /* fall through */ }
+    }
+  }
+  if (!arr || !arr.length) return json({ success: false, error: 'Could not read file' });
+  const at = questionIndexFor(arr, index, qid);
+  if (!arr[at]) return json({ success: false, error: 'Question not found in file' });
+  const q = arr[at];
+  return json({ success: true, index: at, qid: qid ? Number(qid) : null, total: arr.length, question: { q: q.q || q.question || '', options: q.options || q.opts || [], correct: q.correct ?? q.answer ?? null, explanation: q.explanation || q.exp || '' } });
 }
 
 export async function adminupdatequestion(params: Record<string, unknown>) {
@@ -462,17 +477,41 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
     return json({ success: true, duplicate: true, qid: qid ? Number(qid) : null });
   }
 
+  // Load the file from Supabase Storage (subjective) or the CONTENT CDN
+  // (objective/Drive-backed). Track whether we can write it back.
+  let raw: any = null;
+  let arr: any[] = [];
+  let writable = false;
   try {
     const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
-    if (error || !blob) throw new Error('File not found');
-    const raw = JSON.parse(await blob.text());
-    const arr = flattenQuestions(raw);
-    const at = questionIndexFor(arr, index, qid);
-    if (!arr[at]) return json({ success: false, error: 'Question not found' });
+    if (!error && blob) {
+      raw = JSON.parse(await blob.text());
+      arr = flattenQuestions(raw);
+      writable = true;
+    } else {
+      throw new Error('not in storage');
+    }
+  } catch {
+    if (/^[A-Za-z0-9_-]+$/.test(fileId)) {
+      const base = (Deno.env.get('CONTENT_CDN_BASE') || 'https://cdn.jsdelivr.net/gh/abhyasapp/content@main').replace(/\/+$/, '');
+      try {
+        const res = await fetch(`${base}/content/${encodeURIComponent(fileId)}.json`, { signal: AbortSignal.timeout(10000) });
+        if (res.ok) { raw = await res.json(); arr = flattenQuestions(raw); }
+      } catch { /* fall through */ }
+    }
+  }
+  if (!arr || !arr.length) return json({ success: false, error: 'Could not read file' });
 
-    const currentQ = arr[at].q || arr[at].question || '';
-    if (String(currentQ).trim() !== expectedQ) return json({ success: false, error: 'File changed since you opened it. Please reload.' });
+  const at = questionIndexFor(arr, index, qid);
+  if (!arr[at]) return json({ success: false, error: 'Question not found' });
 
+  const currentQ = arr[at].q || arr[at].question || '';
+  // When a qid is present the question was located by id, so position/text
+  // drift does not mean "wrong question" — qid is authoritative. Only enforce
+  // the concurrency guard for legacy (qid-less) reports.
+  if (!qid && String(currentQ).trim() !== expectedQ) return json({ success: false, error: 'File changed since you opened it. Please reload.' });
+
+  try {
     // Verbatim before-side for the correction pipeline (source number and
     // full option text included). The report snapshot is trimmed for display.
     const curCorrect = arr[at].correct ?? arr[at].answer ?? null;
@@ -512,11 +551,16 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
     if (after.options.length) arr[at].options = after.options;
     if (after.correctIndex !== null) arr[at].correct = after.correctIndex;
     arr[at].explanation = after.explanation;
-    const newContent = JSON.stringify(raw);
-    const { error: upErr } = await supabase.storage.from('subjective-content').upload(fileId, newContent, { upsert: true, contentType: 'application/json' });
-    if (upErr) {
-      await supabase.from('correction_events').delete().eq('dedupe_key', dedupeKey).eq('corrected_at', correctedAt);
-      throw upErr;
+    // Only subjective files live in Supabase Storage and can be written back.
+    // Objective/Drive-backed files are corrected through the event log + pipeline
+    // (which re-exports from Neon), so no file write is needed there.
+    if (writable) {
+      const newContent = JSON.stringify(raw);
+      const { error: upErr } = await supabase.storage.from('subjective-content').upload(fileId, newContent, { upsert: true, contentType: 'application/json' });
+      if (upErr) {
+        await supabase.from('correction_events').delete().eq('dedupe_key', dedupeKey).eq('corrected_at', correctedAt);
+        throw upErr;
+      }
     }
 
     try {
@@ -568,7 +612,7 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
   const entries: any[] = [];
   const pending: Pending[] = [];
   const seen = new Set<string>();
-  const files = new Map<string, { arr: any[]; raw: any }>();
+  const files = new Map<string, { arr: any[]; raw: any; writable: boolean }>();
 
   for (const item of items) {
     const key = String(item?.key || '');
@@ -600,10 +644,23 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
 
       let file = files.get(fileId);
       if (!file) {
-        const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
-        if (error || !blob) throw new Error('File not found');
-        const raw = JSON.parse(await blob.text());
-        file = { arr: flattenQuestions(raw), raw };
+        let raw: any = null;
+        let writable = false;
+        try {
+          const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
+          if (!error && blob) { raw = JSON.parse(await blob.text()); writable = true; }
+          else throw new Error('not in storage');
+        } catch {
+          if (/^[A-Za-z0-9_-]+$/.test(fileId)) {
+            const base = (Deno.env.get('CONTENT_CDN_BASE') || 'https://cdn.jsdelivr.net/gh/abhyasapp/content@main').replace(/\/+$/, '');
+            try {
+              const res = await fetch(`${base}/content/${encodeURIComponent(fileId)}.json`, { signal: AbortSignal.timeout(10000) });
+              if (res.ok) raw = await res.json();
+            } catch { /* fall through */ }
+          }
+        }
+        if (!raw) throw new Error('File not found');
+        file = { arr: flattenQuestions(raw), raw, writable };
         files.set(fileId, file);
       }
       const at = questionIndexFor(file.arr, index, qid);
@@ -611,7 +668,10 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
       if (!q) throw new Error('Question not found');
       const currentQ = q.q || q.question || '';
       const expectedQ = String(item.expectedQ || '').trim();
-      if (expectedQ && String(currentQ).trim() !== expectedQ) {
+      // qid is authoritative: when present, the question was located by id, so
+      // position/text drift is not a conflict. Only legacy (qid-less) reports
+      // use the expectedQ concurrency guard.
+      if (!qid && expectedQ && String(currentQ).trim() !== expectedQ) {
         entry.conflict = true;
         throw new Error('The question changed since you opened it.');
       }
@@ -675,6 +735,9 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
   const failedFiles = new Set<string>();
   for (const [fileId, file] of files) {
     if (!touched.has(fileId)) continue;
+    // Objective/Drive-backed files are not writable here; the pipeline applies
+    // the correction via the event log and re-exports from Neon.
+    if (!file.writable) continue;
     const { error } = await supabase.storage.from('subjective-content')
       .upload(fileId, JSON.stringify(file.raw), { upsert: true, contentType: 'application/json' });
     if (error) failedFiles.add(fileId);
