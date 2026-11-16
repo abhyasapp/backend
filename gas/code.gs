@@ -58,7 +58,7 @@
      3. Handle `mustChangePassword: true` from login / adminLogin.
    ═══════════════════════════════════════════════════════════════════════ */
 
-const APP_VERSION = "1.45";
+const APP_VERSION = "1.46";
 
 const DEFAULT_SPREADSHEET_ID = "1yJF3kIGcwKHHdlcmw7ZUWBoUBMDeRWP7eaGBdDtUD_o";
 

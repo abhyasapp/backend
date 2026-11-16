@@ -1,4 +1,4 @@
-# Changes (v1.68 Supabase · v1.45 Apps Script)
+# Changes (v1.68 Supabase · v1.46 Apps Script)
 
 ## 16 November 2026 — v1.68: the explanation stops leaking
 - `stripAnswers` now also removes `explain`, the key the published content files
