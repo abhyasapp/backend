@@ -1,4 +1,19 @@
-# Changes (v1.69 Supabase · v1.46 Apps Script)
+# Changes (v1.70 Supabase · v1.46 Apps Script)
+
+## 16 November 2026 — v1.70: corrections go to Neon
+
+- Reports stay where they are, in Supabase. Once a report's question id is known,
+  `adminNeonQuestion` looks the same question up in Neon by its public qn id
+  (`70024.730011`) and returns what Neon currently marks correct.
+- `adminNeonCorrect` applies the fix there: one statement updates the question and
+  writes the previous answer to `applied_corrections`, so the change is traceable
+  to the report. Reports written before public ids existed carry the older
+  internal number, which is matched against `questions.id` instead.
+- The console shows the Neon match in the report sheet and mirrors every pushed
+  correction into Neon, reporting any Neon failure instead of hiding it.
+- Neon is reached over HTTPS (`npm:@neondatabase/serverless`) with
+  `NEON_DATABASE_URL`. Without that secret the actions answer `neonMissing` and
+  the console says so rather than failing silently.
 
 ## 16 November 2026 — v1.69: an admin can read content
 

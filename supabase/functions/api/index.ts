@@ -14,6 +14,7 @@ import * as Reports from './handlers/reports.ts';
 import * as Admin from './handlers/admin.ts';
 import * as Subj from './handlers/subjective.ts';
 import * as Payments from './handlers/payments.ts';
+import * as Neon from './handlers/neon.ts';
 
 // ── Route table ────────────────────────────────────────────────────────
 const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> = {
@@ -103,6 +104,10 @@ const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> =
   'adminexportcorrections': Reports.adminexportcorrections,
   'adminmarkfilecorrected': Reports.adminmarkfilecorrected,
   'synccorrectionssince': Reports.synccorrectionssince,
+
+  // ── Neon (content database) ─────────────────────────────────────────
+  'adminneonquestion': Neon.adminneonquestion,
+  'adminneoncorrect': Neon.adminneoncorrect,
   'syncreportssince': Reports.syncreportssince,
   'clearreports': Reports.clearreports,
   'adminmostmissedquestions': Reports.adminmostmissedquestions,

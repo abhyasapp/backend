@@ -1,6 +1,6 @@
 // _shared/config.ts — shared constants for every handler in the API function.
 
-export const FUNCTION_VERSION = '1.69';
+export const FUNCTION_VERSION = '1.70';
 
 // Origin allow-list (also used by withCors in index.ts). Override in the
 // Supabase dashboard → Project Settings → Edge Functions → Secrets.
