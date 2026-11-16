@@ -1,4 +1,15 @@
-# Changes (v1.67 Supabase · v1.45 Apps Script)
+# Changes (v1.68 Supabase · v1.45 Apps Script)
+
+## 16 November 2026 — v1.68: the explanation stops leaking
+- `stripAnswers` now also removes `explain`, the key the published content files
+  actually use for the worked reason. The deployed function only knew the older
+  spellings (`explanation`, `exp`), so during an exam window a student could read
+  why an option was right. **The live function needs this deployment.**
+- Question reports keep the public `qid` through create, de-duplication and
+  sibling closure, and `adminGetStudentOverview` returns `qid` and `uid` beside
+  every report, so the console can name a question without its Drive id.
+- `FUNCTION_VERSION` moved to 1.68: `?action=ping` reports it, which is the only
+  way to tell whether a deployment actually landed.
 
 ## 15 November 2026 — qid is a string end to end
 - `qid` is the canonical lowercase **string** in every response (`qidString()`
