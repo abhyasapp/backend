@@ -1,4 +1,13 @@
-# Changes (v1.68 Supabase · v1.46 Apps Script)
+# Changes (v1.69 Supabase · v1.46 Apps Script)
+
+## 16 November 2026 — v1.69: an admin can read content
+
+- `getFile` / `getFiles` checked for a *student* session first, so every console
+  read was refused with "Session expired" before the admin token was ever
+  considered. The console then fell back to Drive, where historical sets are no
+  longer allowed, and showed question ids instead of text.
+- Both handlers now accept an admin session first, the same order Apps Script
+  uses, and skip the student access gate for it.
 
 ## 16 November 2026 — v1.68: the explanation stops leaking
 - `stripAnswers` now also removes `explain`, the key the published content files

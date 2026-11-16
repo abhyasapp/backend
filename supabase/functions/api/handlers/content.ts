@@ -80,28 +80,37 @@ async function callerIsAdmin(params: Record<string, unknown>): Promise<boolean> 
   return res.ok;
 }
 
+/* An admin session is accepted before a student one, the same order Apps Script
+   uses. Checking students first rejected every console read with "Session
+   expired", so the console could never read content from Storage and had to fall
+   back to Drive, where historical sets are no longer allowed. */
 export async function getfile(params: Record<string, unknown>) {
-  const auth = await authUser(params);
-  if (!auth.ok) return json(auth.error);
-  const gate = requireAccess(auth);
-  if (gate) return json(gate);
+  const isAdmin = await callerIsAdmin(params);
+  if (!isAdmin) {
+    const auth = await authUser(params);
+    if (!auth.ok) return json(auth.error);
+    const gate = requireAccess(auth);
+    if (gate) return json(gate);
+  }
 
   const fileId = String(params.fileId || params.file_id || params.id || params.path || '').trim();
   if (!fileId) return json({ success: false, error: 'fileId required' });
-  return json(await resolveFilePayload(fileId, await callerIsAdmin(params)));
+  return json(await resolveFilePayload(fileId, isAdmin));
 }
 
 export async function getfiles(params: Record<string, unknown>) {
-  const auth = await authUser(params);
-  if (!auth.ok) return json(auth.error);
-  const gate = requireAccess(auth);
-  if (gate) return json(gate);
+  const isAdmin = await callerIsAdmin(params);
+  if (!isAdmin) {
+    const auth = await authUser(params);
+    if (!auth.ok) return json(auth.error);
+    const gate = requireAccess(auth);
+    if (gate) return json(gate);
+  }
 
   const ids = [...new Set(String(params.fileIds || '').split(',').map(s => s.trim()).filter(Boolean))];
   if (!ids.length) return json({ success: false, error: 'Missing fileIds parameter.' });
   if (ids.length > 8) return json({ success: false, error: 'Max 8 files per request.' });
 
-  const isAdmin = await callerIsAdmin(params);
   const files: Record<string, unknown> = {};
   const deferred: string[] = [];
   let totalChars = 0;
