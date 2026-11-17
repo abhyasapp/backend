@@ -10,15 +10,19 @@ Study-PWA backend for Nepal Lok Sewa preparation.
 
 ## Default admin login
 
-On the first admin login of a fresh install the owner account is created:
+On the first admin login of a fresh install the owner account `admin` is created
+with the password held in the `DEFAULT_OWNER_PASSWORD` secret, and flagged
+`must_change_password: true`. The Edge Function ships **no** default password: if
+the secret is missing, owner creation is refused and the reason is logged. A
+bootstrap password written into the source is a public credential.
 
-    username: admin
-    password: abhyas
+    supabase secrets set DEFAULT_OWNER_PASSWORD=<private>   # before the first login
 
 The password change is **forced**: until it is changed, every admin action except
 "change password" is refused (`mustChangePassword: true`).
-`abhyas` is public — **log in and change it immediately**, or set a private
-starting password first: `supabase secrets set DEFAULT_OWNER_PASSWORD=<private>`.
+
+The Apps Script fallback keeps its own bootstrap constant in `code.gs` — set it to
+a private value before deploying that path to a fresh install.
 
 Owner-only: create / promote / delete admins, set permissions, reset admin
 passwords, promote / demote owners. A student becomes an admin only when the
@@ -40,7 +44,7 @@ owner promotes them. The last owner can never be deleted or demoted.
    All are idempotent; an existing database only needs the newer ones.
 2. **Edge Function**
    ```bash
-   supabase secrets set DEFAULT_OWNER_PASSWORD=abhyas      # or a private value
+   supabase secrets set DEFAULT_OWNER_PASSWORD=<private>   # required; no default
    supabase functions deploy api
    ```
 3. **Apps Script** — paste `code.gs`, `sync.gs`, `supabase-bridge.gs`, `report.gs`,
@@ -52,7 +56,7 @@ owner promotes them. The last owner can never be deleted or demoted.
 
 ## Smoke test
 
-- `admin` / `abhyas` → forced password change → console unlocks.
+- `admin` / the `DEFAULT_OWNER_PASSWORD` value → forced password change → console unlocks.
 - Promote a test student with one permission; they only get that area.
 - GAS password reset → log in on Supabase with the new password.
 - Open one weekly set (quiz loads with questions).

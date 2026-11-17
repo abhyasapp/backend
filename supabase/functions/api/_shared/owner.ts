@@ -35,7 +35,7 @@ export function passwordProblem(password: string, username = '', currentPassword
   if (pw.length > MAX_PASSWORD_LENGTH) return 'Password is too long.';
   const low = pw.toLowerCase();
   if (COMMON_PASSWORDS.includes(low) || /^(.)\1+$/.test(pw)) return 'That password is too easy to guess. Choose something less common.';
-  if (low === DEFAULT_OWNER_PASSWORD.toLowerCase()) return "Choose a password that isn't the default one.";
+  if (DEFAULT_OWNER_PASSWORD && low === DEFAULT_OWNER_PASSWORD.toLowerCase()) return "Choose a password that isn't the default one.";
   if (username && username.length >= 4 && low.includes(username.toLowerCase())) return "Your password shouldn't contain your username.";
   if (currentPassword && pw === currentPassword) return 'New password must be different from the current one.';
   return '';
@@ -85,6 +85,13 @@ export async function ensureDefaultOwner(): Promise<void> {
         .eq('username', DEFAULT_OWNER_USERNAME);
       await writeAuditLog('system', 'Owner Repaired', DEFAULT_OWNER_USERNAME, 'No owner existed; promoted default admin.');
       ownerKnownToExist = true;
+      return;
+    }
+
+    if (!DEFAULT_OWNER_PASSWORD) {
+      // No published bootstrap password: refuse rather than create an account
+      // anyone who reads the source could sign in to.
+      console.error('[owner] DEFAULT_OWNER_PASSWORD secret is not set; refusing to create the default owner.');
       return;
     }
 

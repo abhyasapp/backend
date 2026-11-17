@@ -17,13 +17,13 @@ export const PW_ITERATIONS = 600000;   // PBKDF2-HMAC-SHA256 iterations
 
 // ── Owner / admin model ────────────────────────────────────────────────
 // The owner account is created lazily on the first admin login when no owner
-// exists yet. It starts with DEFAULT_OWNER_PASSWORD (default: "abhyas") and is
-// flagged must_change_password, so nothing except changing the password works
-// until the owner picks a new one.
-// For safety set DEFAULT_OWNER_PASSWORD to a private value before the first
-// login:  supabase secrets set DEFAULT_OWNER_PASSWORD=<private>
+// exists yet, using DEFAULT_OWNER_PASSWORD and flagged must_change_password, so
+// nothing except changing the password works until the owner picks a new one.
+// There is no built-in default: the secret must be set before the first login
+// (supabase secrets set DEFAULT_OWNER_PASSWORD=<private>), otherwise owner
+// creation is refused. A published bootstrap password is a public credential.
 export const DEFAULT_OWNER_USERNAME = (Deno.env.get('DEFAULT_OWNER_USERNAME') || 'admin').trim().toLowerCase();
-export const DEFAULT_OWNER_PASSWORD = Deno.env.get('DEFAULT_OWNER_PASSWORD') || 'abhyas';
+export const DEFAULT_OWNER_PASSWORD = Deno.env.get('DEFAULT_OWNER_PASSWORD') || '';
 export const MIN_PASSWORD_LENGTH = 8;
 export const MAX_PASSWORD_LENGTH = 256;
 export const RESERVED_USERNAMES = ['admin', 'administrator', 'root', 'owner', 'system', 'support', 'abhyas'];
