@@ -6,39 +6,13 @@ import { randId } from '../_shared/crypto.ts';
 import { markFileCorrected, readProgress, extractCorrectAnswers } from '../_shared/utils.ts';
 import { chunk } from '../_shared/pure.ts';
 import { rlBlocked, rlHit, RL_TOO_MANY } from '../_shared/rate-limit.ts';
+import { QID_FIELDS, qidString, qidMatches } from '../_shared/qid.ts';
+import { overlayQuestions } from '../_shared/corrections.ts';
 
 function safeJsonParse<T = unknown>(s: unknown, fallback: T): T {
   if (typeof s !== 'string' || !s) return fallback;
   try { return JSON.parse(s) as T; } catch { return fallback; }
 }
-
-function qidString(v: unknown): string {
-  const s = String(v == null ? '' : v).trim();
-  if (/^\d+$/.test(s)) return s;
-  // Generated public qn ids (LCCCSSSFQQQQ): accept any reasonable casing and
-  // normalise to a stable lowercase form so dedup, sibling-closure and
-  // correction-event idempotency keys stay consistent across the stack.
-  if (/^[A-Za-z0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{6}$/.test(s)) {
-    return s.replace(/[^A-Za-z0-9-]/g, '').toLowerCase();
-  }
-  // Ids as actually published in abhyasapp/content: "<fileId>-<position>",
-  // e.g. "1-VeNFb81ynETihERKfWNUOZSqrYopyOH-1". Every real question uses this
-  // shape and the previous pattern rejected all of them, which stored qid ''
-  // and silently fell back to the position. Case is preserved because the
-  // fileId part is case-sensitive for every other consumer.
-  if (/^[A-Za-z0-9_-]{1,200}-\d{1,5}$/.test(s)) return s;
-  // The public qn id the pipeline writes to `public_qn`: level token, chapter,
-  // subtopic and sequence, either dotted ("50011.110001", "G0011.110001") or
-  // flat, the only shape that can carry a word subtopic ("5002mixedqn10001").
-  // Both were rejected before, so a General Knowledge or any migrated question
-  // fell back to its position. Lowercased like every other public id so one
-  // question keys identically whichever field delivered it.
-  if (/^[A-Za-z0-9][A-Za-z0-9._]{3,63}$/.test(s) && /\d/.test(s)) {
-    return s.toLowerCase();
-  }
-  return '';
-}
-
 
 /** Identity of one per-question result inside a progress blob: the stable qid
     when the client recorded it, the positional uid otherwise. A correction or
@@ -112,24 +86,6 @@ function reportView(r: Record<string, any>) {
     correctedSnapshot: r.corrected_snapshot ? safeJsonParse<unknown>(r.corrected_snapshot, null) : null,
     openReporters: 0,
   };
-}
-
-// Fields a content question may carry its stable id on. `id` holds the internal
-// numeric qid in older files and the public hyphenated qn id in newer ones; the
-// others are accepted so a file that keeps both is never split into two rows.
-const QID_FIELDS = ['id', 'qid', 'qnid', 'publicId', 'publicQid', 'code'];
-
-/** True when a stored id is the wanted one, compared in the canonical form
-    qidString() produces — so the public `A-123-456-789012` matches
-    `a-123-456-789012` instead of falling through to the position. */
-function qidMatches(candidate: unknown, wanted: string): boolean {
-  if (!wanted) return false;
-  const raw = String(candidate == null ? '' : candidate).trim();
-  if (!raw) return false;
-  if (raw === wanted) return true;
-  if (raw.toLowerCase() === wanted.toLowerCase()) return true;
-  const norm = qidString(raw);
-  return !!norm && norm === wanted;
 }
 
 /** Position of a question inside its file, resolved by stable identity:
@@ -532,6 +488,8 @@ export async function admingetquestion(params: Record<string, unknown>) {
     }
   }
   if (!arr || !arr.length) return json({ success: false, error: 'Could not read file' });
+  // Show the question as the correction log has it, not as the pipeline last exported it.
+  await overlayQuestions(arr);
   const at = questionIndexFor(arr, index, qid);
   if (!arr[at]) return json({ success: false, error: 'Question not found in file' });
   const q = arr[at];

@@ -11,7 +11,7 @@
     "typescript": "^5.6.0"
   },
   "scripts": {
-    "test": "node --test tests/schema.test.mjs tests/sync.test.js tests/headers.test.mjs supabase/functions/api/_shared/pure.test.ts && node tests/gas-sync.test.js && node --import ./tests/handlers/register.mjs tests/handlers/owner-admin.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/student-overview.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/reports.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/neon.test.mjs && node --import ./tests/handlers/register-no-owner-password.mjs tests/handlers/owner-bootstrap.test.mjs",
+    "test": "node --test tests/schema.test.mjs tests/sync.test.js tests/headers.test.mjs supabase/functions/api/_shared/pure.test.ts && node tests/gas-sync.test.js && node --import ./tests/handlers/register.mjs tests/handlers/owner-admin.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/student-overview.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/reports.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/neon.test.mjs && node --import ./tests/handlers/register-no-owner-password.mjs tests/handlers/owner-bootstrap.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/corrections-overlay.test.mjs",
     "test:sync": "node --test tests/sync.test.js",
     "test:gas": "node tests/gas-sync.test.js",
     "test:handlers": "node --import ./tests/handlers/register.mjs tests/handlers/owner-admin.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/student-overview.test.mjs && node --import ./tests/handlers/register.mjs tests/handlers/reports.test.mjs",

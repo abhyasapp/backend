@@ -4,6 +4,7 @@ import { authUser, authAdmin, requireAccess } from '../_shared/auth.ts';
 import { safeStoragePath } from '../_shared/utils.ts';
 import { stripAnswers } from '../_shared/pure.ts';
 import { FILE_LEGACY_CONTENT, WEEKLY_EXAM_WINDOW_MS, WEEKLY_HIDE_ANSWERS } from '../_shared/config.ts';
+import { overlayFileJson } from '../_shared/corrections.ts';
 
 const BUCKETS = ['subjective-content', 'weekly-sets', 'study-docs'];
 // submitweeklyattempt accepts answers until release + window + 3h, so keep answers hidden that long.
@@ -64,6 +65,13 @@ async function resolveFilePayload(fileId: string, isAdmin = false): Promise<Reco
   // is kept for legacy clients while FILE_LEGACY_CONTENT is not 'false'.
   let result: unknown = text;
   try { result = JSON.parse(text); } catch { /* not JSON — hand back the raw text */ }
+  // An admin correction reaches the learner on the next request instead of waiting
+  // for the pipeline to re-export the file (docs/content-versioning.md, phase 0).
+  // Applied before answers are stripped, so an open exam window never leaks a fixed key.
+  if (result && typeof result === 'object') {
+    const corrected = await overlayFileJson(result);
+    if (corrected) text = JSON.stringify(result);
+  }
   if (hideAnswers && typeof result === 'object' && result !== null) {
     result = stripAnswers(result);
     text = JSON.stringify(result);
