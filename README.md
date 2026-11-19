@@ -56,7 +56,7 @@ owner promotes them. The last owner can never be deleted or demoted.
 
 ## Smoke test
 
-- `admin` / the `DEFAULT_OWNER_PASSWORD` value → forced password change → console unlocks.
+- `admin` / `abhyas` → forced password change → console unlocks.
 - Promote a test student with one permission; they only get that area.
 - GAS password reset → log in on Supabase with the new password.
 - Open one weekly set (quiz loads with questions).

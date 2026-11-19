@@ -15,7 +15,7 @@ const SUPABASE_URL_DEFAULT_ = "https://kdysjiiefvxnkrykgykz.supabase.co";
 
 function bridgeConfig_() {
   const props = PropertiesService.getScriptProperties();
-  const key = props.getProperty("SUPABASE_SERVICE_ROLE_KEY") || "";
+  const key = props.getProperty("SUPABASE_SERVICE_ROLE_KEY") || props.getProperty("SUPABASE_SERVICE_KEY") || "";   /* either name */
   const url = String(props.getProperty("SUPABASE_URL") || SUPABASE_URL_DEFAULT_).replace(/\/+$/, "");
   return { key: key, url: url };
 }

@@ -127,7 +127,7 @@ export async function updateprofile(params: Record<string, unknown>) {
 
 // GAP-01: user-facing change-password (previously only via GAS stubs)
 export async function changepassword(params: Record<string, unknown>) {
-  const auth = await authUser(params);
+  const auth = await authUser(params, { withHash: true });
   if (!auth.ok) return json(auth.error);
   const currentPassword = String(params.currentPassword || '');
   const newPassword = String(params.newPassword || '');
@@ -165,13 +165,16 @@ export async function resetmyprogress(params: Record<string, unknown>) {
   if (String(params.confirm || '').trim().toUpperCase() !== 'RESET') return json({ success: false, error: 'Type RESET to confirm.' });
 
   await supabase.from('progress').delete().eq('username', auth.username);
+  // Per-question state (notes, bookmarks, mistakes, counters) and the answer log are progress too.
+  await supabase.from('user_qstate').delete().eq('username', auth.username);
+  await supabase.from('answer_events').delete().eq('username', auth.username);
   await supabase.from('progress_history').delete().eq('username', auth.username);
   await supabase.from('progress_backups').delete().eq('username', auth.username);
   return json({ success: true, cleared: { progress: 1, history: 1, backups: 1 } });
 }
 
 export async function deletemyaccount(params: Record<string, unknown>) {
-  const auth = await authUser(params);
+  const auth = await authUser(params, { withHash: true });
   if (!auth.ok) return json(auth.error);
   if (String(params.confirm || '').trim().toUpperCase() !== 'DELETE') return json({ success: false, error: 'Type DELETE to confirm.' });
   // Google-only accounts have a locked (unusable) hash and no password to confirm with;
@@ -196,7 +199,7 @@ export async function deletemyaccount(params: Record<string, unknown>) {
   const subjPaths = (subjRows || []).map(r => String(r.pdf_file_id || '')).filter(p => isStoragePath(p));
   const backupPaths = (subjRows || []).map(r => String(r.pdf_original_backup_id || '')).filter(p => isStoragePath(p));
 
-  const tables = ['progress', 'progress_history', 'progress_backups', 'payments', 'push_tokens', 'weekly_attempts', 'weekly_starts', 'subjective_submissions'];
+  const tables = ['progress', 'progress_history', 'progress_backups', 'payments', 'push_tokens', 'weekly_attempts', 'weekly_starts', 'subjective_submissions', 'user_qstate', 'answer_events'];
   for (const t of tables) {
     const { error } = await supabase.from(t).delete().eq('username', auth.username);
     if (error) return json({ success: false, error: `${t}: ${dbMsg(error)}` });

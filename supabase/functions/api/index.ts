@@ -14,7 +14,9 @@ import * as Reports from './handlers/reports.ts';
 import * as Admin from './handlers/admin.ts';
 import * as Subj from './handlers/subjective.ts';
 import * as Payments from './handlers/payments.ts';
-import * as Neon from './handlers/neon.ts';
+import * as QState from './handlers/qstate.ts';
+import * as Bootstrap from './handlers/bootstrap.ts';
+import * as Pipeline from './handlers/pipeline.ts';
 
 // ── Route table ────────────────────────────────────────────────────────
 const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> = {
@@ -82,6 +84,16 @@ const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> =
   'admindeleteweeklyset': Weekly.admindeleteweeklyset,
   'adminlistweeklysets': Weekly.adminlistweeklysets,
   'adminweeklysetresults': Weekly.adminweeklysetresults,
+  'adminrescoreweeklyset': Weekly.adminrescoreweeklyset,
+  // ── qid-centric (docs/QID-CONTRACT.md) ──
+  'bootstrap': Bootstrap.bootstrap,
+  'syncqstate': QState.syncqstate,
+  'recordanswers': QState.recordanswers,
+  'getqidpatches': QState.getqidpatches,
+  'resolveqids': QState.resolveqids,
+  'adminqidcoverage': QState.adminqidcoverage,
+  'ingestquestionindex': QState.ingestquestionindex,
+  'rebuildqidstats': QState.rebuildqidstats,
 
   // ── Reports & Corrections ──────────────────────────────────────────
   'reportquestion': Reports.reportquestion,
@@ -104,11 +116,9 @@ const ROUTES: Record<string, (params: any, req: Request) => Promise<Response>> =
   'adminexportcorrections': Reports.adminexportcorrections,
   'adminmarkfilecorrected': Reports.adminmarkfilecorrected,
   'synccorrectionssince': Reports.synccorrectionssince,
-
-  // ── Neon (content database) ─────────────────────────────────────────
-  'adminneonquestion': Neon.adminneonquestion,
-  'adminneoncorrect': Neon.adminneoncorrect,
-  'syncreportssince': Reports.syncreportssince,
+  'syncreportssince': Pipeline.syncreportssince,
+  'resolvereports': Pipeline.resolvereports,
+  'admincorrect': Pipeline.admincorrect,
   'clearreports': Reports.clearreports,
   'adminmostmissedquestions': Reports.adminmostmissedquestions,
   'adminuploadweeklysetfile': Reports.adminuploadweeklysetfile,

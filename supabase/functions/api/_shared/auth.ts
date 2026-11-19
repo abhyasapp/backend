@@ -32,12 +32,20 @@ export async function issueAdminToken(username: string): Promise<string> {
   return token;
 }
 
-export async function authUser(params: Record<string, unknown>) {
+// Every users column EXCEPT pass_hash. authUser runs on every authenticated request,
+// so it must not drag the password hash across the wire (and into memory) each time.
+// tests/schema.test.mjs pins this list to the real table so a new column cannot be
+// silently missing from `auth.user`.
+export const USER_COLS_NO_HASH =
+  'username,name,email,mobile,contact,contact_type,status,created_at,approved_at,role,trial_expires_at,payment_status,permanent_access,access_type,access_expires_at,session_token,session_token_expires_at,email_verified';
+
+/** `withHash: true` only for the few handlers that verify or compare the password hash. */
+export async function authUser(params: Record<string, unknown>, opts: { withHash?: boolean } = {}) {
   const username = String(params.username || '').trim();
   const errResp = { success: false, error: 'Session expired. Please log in again.', sessionInvalid: true };
   if (!username) return { ok: false as const, error: { success: false, error: 'Username required.' } };
 
-  const { data } = await supabase.from('users').select('*').eq('username', username).limit(1);
+  const { data } = await supabase.from('users').select(opts.withHash ? '*' : USER_COLS_NO_HASH).eq('username', username).limit(1);
   const user = data && data[0] ? data[0] : null;
   if (!user) return { ok: false as const, error: errResp };
   // A rejected account may not keep using a session that was issued before it was rejected.

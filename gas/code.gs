@@ -58,7 +58,7 @@
      3. Handle `mustChangePassword: true` from login / adminLogin.
    ═══════════════════════════════════════════════════════════════════════ */
 
-const APP_VERSION = "1.46";
+const APP_VERSION = "1.47";
 
 const DEFAULT_SPREADSHEET_ID = "1yJF3kIGcwKHHdlcmw7ZUWBoUBMDeRWP7eaGBdDtUD_o";
 
@@ -124,11 +124,13 @@ const ADMIN_HEADERS = [
 const PROGRESS_HEADERS = ["username","data","updatedAt"];
 const PUSHTOKENS_HEADERS = ["username","fcmToken","updatedAt"];
 const WEEKLYSET_HEADERS = [
-  "id","title","fileId","chapterLabel","status","uploadedBy","uploadedAt","releaseAt"
+  "id","title","fileId","chapterLabel","status","uploadedBy","uploadedAt","releaseAt",
+  "qids","fileRev"          /* frozen paper: ordered qid list (JSON) + revision */
 ];
 const WEEKLYATTEMPT_HEADERS = [
   "username","weeklyId","answersJson","totalQuestions",
-  "correctClaimed","skippedCount","startedAt","submittedAt","durationSec"
+  "correctClaimed","skippedCount","startedAt","submittedAt","durationSec",
+  "answersByQid","qids","fileRev","voided"   /* qid-keyed view of the same attempt */
 ];
 const SUBJ_SUBMISSION_HEADERS = [
   "id","username","kind","questionId","questionText","questionMarks",
@@ -275,7 +277,8 @@ const POST_ONLY_ACTIONS = {
   login: 1, googlelogin: 1, signup: 1, resetpassword: 1,
   adminlogin: 1, adminchangepassword: 1, admincreateadmin: 1,
   deletemyaccount: 1, resetmyprogress: 1,
-  syncpull: 1, syncpush: 1, synccorrectionssince: 1
+  syncpull: 1, syncpush: 1, synccorrectionssince: 1, ingestquestionindex: 1,
+  syncreportssince: 1, resolvereports: 1, admincorrect: 1, rebuildqidstats: 1   /* secrets travel in the body, never the URL */
 };
 
 const _sheetRefCache = {};
@@ -371,8 +374,16 @@ function getSettingsSheet_()   { return _getOrCreateSheet_(SETTINGS_SHEET, SETTI
 function getLogsSheet_()       { return _getOrCreateSheet_(LOGS_SHEET, LOG_HEADERS, [], "#9c27b0", SpreadsheetApp.BandingTheme.PURPLE, 320); }
 function getProgressSheet_()   { return _getOrCreateSheet_(PROGRESS_SHEET, PROGRESS_HEADERS, [1], "#0f9d58", SpreadsheetApp.BandingTheme.GREEN, 300); }
 function getPushTokensSheet_() { return _getOrCreateSheet_(PUSHTOKENS_SHEET, PUSHTOKENS_HEADERS, [1], "#e67c00", SpreadsheetApp.BandingTheme.ORANGE, 300); }
-function getWeeklySetsSheet_() { return _getOrCreateSheet_(WEEKLYSETS_SHEET, WEEKLYSET_HEADERS, [1,3], "#00acc1", SpreadsheetApp.BandingTheme.CYAN, 320); }
-function getWeeklyAttemptsSheet_()  { return _getOrCreateSheet_(WEEKLYATTEMPTS_SHEET, WEEKLYATTEMPT_HEADERS, [1,2], "#00897b", SpreadsheetApp.BandingTheme.TEAL, 300); }
+function getWeeklySetsSheet_() {
+  const sheet = _getOrCreateSheet_(WEEKLYSETS_SHEET, WEEKLYSET_HEADERS, [1,3], "#00acc1", SpreadsheetApp.BandingTheme.CYAN, 320);
+  _topUpHeaders_(sheet, WEEKLYSET_HEADERS, "#00acc1");
+  return sheet;
+}
+function getWeeklyAttemptsSheet_() {
+  const sheet = _getOrCreateSheet_(WEEKLYATTEMPTS_SHEET, WEEKLYATTEMPT_HEADERS, [1,2], "#00897b", SpreadsheetApp.BandingTheme.TEAL, 300);
+  _topUpHeaders_(sheet, WEEKLYATTEMPT_HEADERS, "#00897b");
+  return sheet;
+}
 function getAdminPermsSheet_()      { return _getOrCreateSheet_(ADMIN_PERMS_SHEET, ADMIN_PERM_HEADERS, [1,2], "#7c3aed", SpreadsheetApp.BandingTheme.PURPLE, 320); }
 function getProgressImportsSheet_() { return _getOrCreateSheet_(PROGRESS_IMPORTS_SHEET, PROGRESS_IMPORT_HEADERS, [], "#5e35b1", SpreadsheetApp.BandingTheme.PURPLE, 320); }
 function getProgressBackupsSheet_() { return _getOrCreateSheet_(PROGRESS_BACKUPS_SHEET, PROGRESS_BACKUP_HEADERS, [], "#455a64", SpreadsheetApp.BandingTheme.GREY, 320); }
@@ -542,8 +553,15 @@ function rowToWeeklySet_(row) {
   return {
     id: row[0] || "", title: row[1] || "", fileId: row[2] || "",
     chapterLabel: row[3] || "", status: row[4] || "active",
-    uploadedBy: row[5] || "", uploadedAt: row[6] || "", releaseAt: row[7] || ""
+    uploadedBy: row[5] || "", uploadedAt: row[6] || "", releaseAt: row[7] || "",
+    qids: weeklyJsonArray_(row[8]), fileRev: String(row[9] || "")
   };
+}
+function weeklyJsonArray_(v) {
+  try { const a = JSON.parse(String(v || "[]")); return Array.isArray(a) ? a.map(String) : []; } catch (e) { return []; }
+}
+function weeklyJsonObject_(v) {
+  try { const o = JSON.parse(String(v || "{}")); return o && typeof o === "object" && !Array.isArray(o) ? o : {}; } catch (e) { return {}; }
 }
 function rowToWeeklyAttempt_(row) {
   let answers = [];
@@ -557,6 +575,8 @@ function rowToWeeklyAttempt_(row) {
     startedAt: Number(row[6] || 0),
     submittedAt: Number(row[7] || 0),
     durationSec: Number(row[8] || 0),
+    answersByQid: weeklyJsonObject_(row[9]), qids: weeklyJsonArray_(row[10]),
+    fileRev: String(row[11] || ""), voided: weeklyJsonArray_(row[12]),
     synced: true
   };
 }
@@ -735,7 +755,9 @@ function doGet(e) {
   const LEGACY_ALLOWED_ = {
     ping: 1, health: 1, verifyemail: 1, resendverification: 1,
     requestpasswordreset: 1, resetpassword: 1,
-    syncpull: 1, syncpush: 1, synccorrectionssince: 1
+    syncpull: 1, syncpush: 1, synccorrectionssince: 1,
+    /* every pipeline endpoint must survive LEGACY_API=off, or the pipeline is locked out */
+    syncreportssince: 1, resolvereports: 1, admincorrect: 1, ingestquestionindex: 1, rebuildqidstats: 1
   };
   if (PropertiesService.getScriptProperties().getProperty("LEGACY_API") === "off" && !LEGACY_ALLOWED_[action]) {
     return jsonResponse({ success: false, error: "This endpoint has moved." });
@@ -801,7 +823,8 @@ function doGet(e) {
         if (!a.ok) { result = a.error; break; }
         const g = requireAccess_(a);
         if (g) { result = g; break; }
-        result = { success: true, map: getHardQuestionsCache_() };
+        /* Preferred: qid-keyed statistics counting DISTINCT students; legacy scan otherwise. */
+        result = (typeof qidHardQuestions_ === "function" ? qidHardQuestions_() : null) || { success: true, map: getHardQuestionsCache_() };
         break;
       }
       case "getsettings":          result = getSettings(); break;
@@ -869,7 +892,8 @@ function doGet(e) {
       case "admintrimlogs":             result = adminTrimLogs(e.parameter); break;
 
       default: {
-        const handled = (typeof REPORT_HANDLE_ === 'function') ? REPORT_HANDLE_(action, e.parameter) : null;
+        let handled = (typeof QID_HANDLE_ === 'function') ? QID_HANDLE_(action, e.parameter) : null;
+        if (handled === null) handled = (typeof REPORT_HANDLE_ === 'function') ? REPORT_HANDLE_(action, e.parameter) : null;
         if (handled !== null) { result = handled; break; }
         result = { success: false, error: "Unknown action: '" + action + "'." };
       }
@@ -2718,13 +2742,21 @@ function adminCreateWeeklySet(p) {
       if (String(existing[i][2]).trim() === fileId) { duplicateOf = existing[i][1]; break; }
     }
 
+    /* Freeze the paper: the ordered qid list + revision as they are NOW. Scoring and
+       re-scoring are always against these question ids, never positions. */
+    const paper = weeklyFreezePaper_(fileId);
+    if (paper.error) return { success: false, error: paper.error };
+
     const id = Utilities.getUuid();
     const now = new Date().toISOString();
-    sheet.appendRow([id, title, fileId, chapterLabel, "active", actor, now, releaseAt.toISOString()]);
+    sheet.appendRow([id, title, fileId, chapterLabel, "active", actor, now, releaseAt.toISOString(),
+                     JSON.stringify(paper.qids), paper.rev]);
     _invalidateSheet_(WEEKLYSETS_SHEET);
     logAction_(actor, "Create Weekly Set", title, "Releases: " + releaseAt.toISOString() + (duplicateOf ? " — WARNING: fileId already used by \"" + duplicateOf + "\"" : ""));
     return {
       success: true, id: id, title: title, releaseAt: releaseAt.toISOString(),
+      qidReady: paper.qidReady, qidCoverage: paper.coverage, frozenQuestions: paper.qids.length,
+      qidWarning: paper.qidReady ? null : "Some questions have no unique id; this set will be scored by position (legacy). Add ids and re-create the set for reorder-safe scoring.",
       duplicateWarning: duplicateOf ? `This fileId is already used by weekly set "${duplicateOf}" — double check this wasn't a mistake.` : null
     };
   });
@@ -2745,7 +2777,23 @@ function adminUpdateWeeklySet(p) {
     const changes = [];
     const updates = [];
     if (p.title !== undefined) { updates.push([2, sanitizeSheetField_(String(p.title).trim())]); changes.push("title"); }
-    if (p.fileId !== undefined) { updates.push([3, String(p.fileId).trim()]); changes.push("fileId"); }
+    if (p.fileId !== undefined) {
+      const newFile = String(p.fileId).trim();
+      if (newFile !== String(found.row[2]).trim()) {
+        /* Swapping the paper under students who already answered it would score their
+           answers against different questions. Create a new set instead. */
+        const att = _cachedSheetData_(WEEKLYATTEMPTS_SHEET, getWeeklyAttemptsSheet_).data;
+        let attempted = false;
+        for (let i = 1; i < att.length; i++) if (String(att[i][1]).trim() === id) { attempted = true; break; }
+        if (attempted && String(p.force || "") !== "true") {
+          return { success: false, error: "Students have already attempted this set; changing its file would re-score them against different questions. Create a new set (or pass force=true to re-freeze)." };
+        }
+        const paper = weeklyFreezePaper_(newFile);
+        if (paper.error) return { success: false, error: paper.error };
+        updates.push([9, JSON.stringify(paper.qids)]); updates.push([10, paper.rev]);
+      }
+      updates.push([3, newFile]); changes.push("fileId");
+    }
     if (p.chapterLabel !== undefined) { updates.push([4, sanitizeSheetField_(String(p.chapterLabel).trim())]); changes.push("chapterLabel"); }
     if (p.status !== undefined && ["active","archived"].indexOf(p.status) !== -1) { updates.push([5, p.status]); changes.push("status→" + p.status); }
     if (p.releaseAt !== undefined) {
@@ -2989,29 +3037,20 @@ function submitWeeklyAttempt(p) {
   if (isNaN(releaseTime) || Date.now() < releaseTime) return { success: false, error: "This weekly set hasn't been released yet." };
   if (Date.now() > releaseTime + WEEKLY_EXAM_WINDOW_MS + 3 * 60 * 60 * 1000) return { success: false, error: "The exam window for this set has closed." };
 
-  let answers;
-  try { answers = JSON.parse(p.answers || "[]"); } catch (e) { return { success: false, error: "Malformed answers array." }; }
-  if (!Array.isArray(answers) || !answers.length || answers.length > 500) return { success: false, error: "Invalid answers array." };
-
-  const normalized = answers.map(function (a) {
-    if (a === null || a === undefined) return null;
-    const n = Number(a);
-    return Number.isInteger(n) && n >= 0 && n < 10 ? n : null;
+  /* Server-authoritative scoring ONLY, by question id against the paper frozen at
+     creation. The legacy positional `answers` array is still accepted and converted
+     by the scoring core; it is never trusted for its positions. If the answer key
+     cannot be loaded the submission is refused — never a client-supplied count. */
+  const hasQid = p.answersByQid !== undefined && String(p.answersByQid === null ? "" : p.answersByQid) !== "";
+  const file = readJsonFileById_(ws.fileId);
+  if (!file || !file.success) return { success: false, error: "Could not load weekly set for scoring. Please try again." };
+  const scored = weeklyScoreQid_({
+    raw: file.result, frozenQids: ws.qids,
+    answersByQid: hasQid ? p.answersByQid : undefined,
+    answers: hasQid ? undefined : (p.answers === undefined ? "[]" : p.answers)
   });
-  const total = normalized.length;
-  const skipped = normalized.filter(function (a) { return a === null; }).length;
-
-  /* Server-authoritative scoring ONLY. If the answer key cannot be loaded,
-     the submission is refused — never fall back to a client-supplied count. */
-  const key = loadWeeklyCorrectAnswers_(ws.fileId);
-  if (!key) {
-    return { success: false, error: "This weekly set is missing a valid answer key. Contact the admin." };
-  }
-  if (key.length !== total) {
-    return { success: false, error: "Your answers don't match this set. Please reload the test and try again." };
-  }
-  const correctFinal = scoreAnswers_(normalized, key).correct;
-  const serverScored = true;
+  if (!scored.ok) return { success: false, error: scored.error, code: scored.code };
+  const normalized = scored.answers, total = scored.total, skipped = scored.skipped, correctFinal = scored.correct;
 
   return withLock_(function () {
     const sheet = getWeeklyAttemptsSheet_();
@@ -3041,15 +3080,19 @@ function submitWeeklyAttempt(p) {
 
     sheet.appendRow([
       username, weeklyId, JSON.stringify(normalized), total, correctFinal,
-      skipped, startedAt, submittedAt, durationSec
+      skipped, startedAt, submittedAt, durationSec,
+      JSON.stringify(scored.answersByQid), JSON.stringify(scored.qids.filter(function (x) { return !!x; })),
+      scored.fileRev, JSON.stringify(scored.voided)
     ]);
     _invalidateSheet_(WEEKLYATTEMPTS_SHEET);
     logAction_("system", "Weekly Set Attempt", username,
       weeklyId + " — " + correctFinal + "/" + total + " in " + durationSec + "s (server-scored)");
     return {
-      success: true,
+      success: true, mode: scored.mode, warnings: scored.warnings,
       attempt: {
-        weeklyId: weeklyId, answers: normalized, total: total, correct: correctFinal,
+        weeklyId: weeklyId, answers: normalized, answersByQid: scored.answersByQid,
+        qids: scored.qids.filter(function (x) { return !!x; }), voided: scored.voided,
+        total: total, correct: correctFinal,
         pct: weeklyMarks_(correctFinal, skipped, total).pct,
         skipped: skipped, startedAt: startedAt, submittedAt: submittedAt, durationSec: durationSec, synced: true
       }
@@ -3068,35 +3111,30 @@ function adminWeeklySetResults(p) {
   if (!wsFound) return { success: false, error: "Weekly set not found." };
   const ws = rowToWeeklySet_(wsFound.row);
 
-  const correctAnswers = loadWeeklyCorrectAnswers_(ws.fileId);
-
+  /* Scores are the ones STORED at submit time (identical policy to the Supabase side).
+     A correction is applied only by an explicit adminRescoreWeeklySet, matched by qid.
+     (This used to re-score live by position whenever the answer COUNT happened to match,
+     so the two backends could show different results for the same attempt.) */
   const data = _cachedSheetData_(WEEKLYATTEMPTS_SHEET, getWeeklyAttemptsSheet_).data;
   const attempts = [];
+  const qidRows = [];
 
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][1]).trim() !== weeklyId) continue;
     const at = rowToWeeklyAttempt_(data[i]);
-    let pct, correct, wrong, skipped;
-    if (correctAnswers && at.answers.length === correctAnswers.length) {
-      const sc = scoreAnswers_(at.answers, correctAnswers);
-      correct = sc.correct; wrong = sc.wrong; skipped = sc.skipped;
-      const denom = at.total || correctAnswers.length;
-      pct = weeklyMarks_(correct, skipped, denom).pct;
-    } else {
-      correct = at.correct;
-      skipped = at.skipped;
-      wrong = Math.max(0, at.total - correct - skipped);
-      pct = weeklyMarks_(correct, skipped, at.total).pct;
-    }
+    const wrong = Math.max(0, at.total - at.correct - at.skipped);
+    const pct = weeklyMarks_(at.correct, at.skipped, at.total).pct;
+    qidRows.push(at.answersByQid);
     attempts.push({
       username: String(data[i][0] || ""),
-      pct: pct, correct: correct, wrong: wrong, skipped: skipped, total: at.total,
+      pct: pct, correct: at.correct, wrong: wrong, skipped: at.skipped, total: at.total,
       durationSec: at.durationSec, submittedAt: at.submittedAt
     });
   }
+  const analysis = weeklyQuestionStats_(ws, qidRows);
 
   if (!attempts.length) {
-    return { success: true, weeklyId: weeklyId, title: ws.title, attempts: 0, uniqueStudents: 0, rescored: !!correctAnswers };
+    return { success: true, weeklyId: weeklyId, title: ws.title, attempts: 0, uniqueStudents: 0, rescored: false };
   }
 
   const pcts = attempts.map(function (a) { return a.pct; });
@@ -3115,7 +3153,7 @@ function adminWeeklySetResults(p) {
     stdDev: Math.round(Math.sqrt(variance)),
     distribution: buckets,
     recent: attempts.sort(function (a, b) { return b.submittedAt - a.submittedAt; }).slice(0, 50),
-    rescored: !!correctAnswers
+    rescored: false, paperChanged: analysis.paperChanged, questionStats: analysis.questionStats.slice(0, 200)
   };
 }
 
@@ -4188,6 +4226,9 @@ function resetMyProgress(p) {
     const progress = deleteRowsForUser_(PROGRESS_SHEET, getProgressSheet_, 0, target);
     const backups = deleteRowsForUser_(PROGRESS_BACKUPS_SHEET, getProgressBackupsSheet_, 2, target);
     const history = deleteRowsForUser_(PROGRESS_HISTORY_SHEET, getProgressHistorySheet_, 0, target);
+    /* Per-question state (notes, bookmarks, mistakes, counters) and the answer log are progress too. */
+    deleteRowsForUser_(QSTATE_SHEET, getUserQStateSheet_, 0, target);
+    deleteRowsForUser_(QEVENTS_SHEET, getAnswerEventsSheet_, 0, target);
     logAction_("system", "Self-Reset Progress", username, "Cleared cloud progress rows: " + progress + ", snapshots: " + backups + ", history: " + history);
     return { success: true, cleared: { progress: progress, snapshots: backups, history: history } };
   });
@@ -4205,7 +4246,9 @@ function purgeUserSheetRows_(username) {
     [PROGRESS_HISTORY_SHEET, getProgressHistorySheet_, 0],
     [WEEKLYATTEMPTS_SHEET, getWeeklyAttemptsSheet_, 0],
     [WEEKLYSTARTS_SHEET, getWeeklyStartsSheet_, 0],
-    [SUBJ_SUBMISSIONS_SHEET, getSubjSubmissionsSheet_, 1]
+    [SUBJ_SUBMISSIONS_SHEET, getSubjSubmissionsSheet_, 1],
+    [QSTATE_SHEET, getUserQStateSheet_, 0],        /* per-question notes, bookmarks, mistakes */
+    [QEVENTS_SHEET, getAnswerEventsSheet_, 0]      /* answer log */
   ];
 
   map.forEach(function (entry) {

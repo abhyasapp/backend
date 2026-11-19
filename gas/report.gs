@@ -84,7 +84,8 @@
 const QREPORT_HEADERS = [
   "id","uid","fileId","questionSnapshot","reason","note","reportedBy","reportedAt","status",
   "optionsSnapshot","correctIndex","chosenIndex","section","appVersion","resolvedAt","resolvedBy","corrected",
-  "correctedSnapshot","qid"
+  "correctedSnapshot","qid",
+  "updatedAt"   /* server-set "last changed" time: the cursor the pipeline's syncreportssince reads */
 ];
 const QREPORT_REASONS = ["wrong_answer","unclear","typo","incomplete","image_problem","other"];
 const QREPORT_SECTIONS = [
@@ -195,7 +196,8 @@ function rowToQReport_(row) {
     resolvedAt: row[14] || "",
     resolvedBy: row[15] || "",
     corrected: String(row[16]).toLowerCase() === "true",
-    correctedSnapshot: correctedSnapshot
+    correctedSnapshot: correctedSnapshot,
+    updatedAt: row.length > 19 ? qreportIso_(row[19]) : ""
   };
 }
 
@@ -329,7 +331,7 @@ function reportQuestion(p) {
       Utilities.getUuid(), r.uid, r.fileId, r.snapshot, r.reason, r.note,
       username, new Date().toISOString(), "open",
       r.optionsSnapshot, r.correctIndex, r.chosenIndex, r.section, r.appVersion,
-      "", "", "", "", r.qid
+      "", "", "", "", r.qid, new Date().toISOString()
     ]);
     _invalidateSheet_(QREPORTS_SHEET);
     return { success: true, message: "Thanks \u2014 this has been sent for review." };
@@ -395,8 +397,10 @@ function adminUpdateQuestionReportStatus(p) {
     const stamp = status === "open"
       ? ["", "", ""]
       : [new Date().toISOString(), actor, signal ? "TRUE" : ""];
+    const changedAt = new Date().toISOString();
     sheet.getRange(found.rowIndex, 9).setValue(status);
     sheet.getRange(found.rowIndex, 15, 1, 3).setValues([stamp]);
+    sheet.getRange(found.rowIndex, 20).setValue(changedAt);
     let alsoClosed = 0;
     if (status === "resolved") {
       const data = sheet.getDataRange().getValues();
@@ -408,6 +412,7 @@ function adminUpdateQuestionReportStatus(p) {
             String(data[i][8]) === "open") {
           sheet.getRange(i + 1, 9).setValue("resolved");
           sheet.getRange(i + 1, 15, 1, 3).setValues([stamp]);
+          sheet.getRange(i + 1, 20).setValue(changedAt);
           alsoClosed++;
         }
       }
@@ -501,14 +506,9 @@ function clearAllQReports() {
 /* Shared with gas/content-index.gs. Keep this one definition; the copy in
    code.gs must be deleted (see the header). */
 function _questionArray_(raw) {
-  if (Array.isArray(raw)) return raw;
-  if (raw && typeof raw === "object") {
-    const keys = ["questions", "data", "quiz", "items"];
-    for (let i = 0; i < keys.length; i++) {
-      if (Array.isArray(raw[keys[i]])) return raw[keys[i]];
-    }
-  }
-  return null;
+  /* ONE traversal order shared with the Supabase side and the app (qid-core.gs). */
+  const arr = qidFlatten_(raw);
+  return (Array.isArray(raw) || arr.length) ? arr : null;
 }
 function _pickKey_(obj, names) {
   for (let i = 0; i < names.length; i++) {
@@ -552,7 +552,7 @@ function adminGetQuestion(p) {
     if (cached) {
       const hit = JSON.parse(cached);
       if (hit && hit.question) {
-        return { success: true, index: hit.at, qid: qid || null, total: hit.total, question: hit.question, cached: true };
+        return { success: true, index: hit.at, qid: qid || hit.qid || null, rev: hit.rev || "", overlay: { applied: 0, skipped: 0 }, total: hit.total, question: hit.question, cached: true };
       }
     }
   } catch (e) {}
@@ -567,18 +567,23 @@ function adminGetQuestion(p) {
   if (!arr[at] || typeof arr[at] !== "object") {
     return { success: false, error: "That question was not found in the file." };
   }
+  /* A read without a qid may only target a question that has no stable id of its own. */
+  if (!qid && !qidPositionWriteAllowed_(arr, at)) {
+    return { success: false, error: "This question has a stable id; send its qid.", code: "qid_required" };
+  }
   const view = _questionView_(arr[at]);
   if (!view.keys.text || !view.keys.options || view.options.length < 2) {
     return { success: false, error: "This question uses a format the editor cannot change. Edit the JSON file in Drive instead." };
   }
   const out = {
-    success: true, index: at, qid: qid || null, total: arr.length,
+    success: true, index: at, qid: qid || qidPrimary_(arr[at]).qid || null, rev: qidQuestionRev_(arr[at]),
+    overlay: { applied: 0, skipped: 0 }, total: arr.length,
     question: {
       q: view.q, options: view.options,
       correct: view.correct, explanation: view.explanation
     }
   };
-  try { cache.put(cacheKey, JSON.stringify({ at: out.index, total: out.total, question: out.question }), 120); } catch (e) {}
+  try { cache.put(cacheKey, JSON.stringify({ at: out.index, total: out.total, question: out.question, rev: out.rev, qid: out.qid }), 120); } catch (e) {}
   return out;
 }
 
@@ -644,8 +649,19 @@ function adminUpdateQuestion(p) {
     if (!view.keys.text || !view.keys.options) {
       return { success: false, error: "This question uses a format the editor cannot change." };
     }
-    /* A valid qid located the question, so position/text drift is not a
-       conflict; only legacy (qid-less) edits use the text guard. */
+    /* Identity first: a qid-less edit may only target a question with no stable id. */
+    if (!qid && !qidPositionWriteAllowed_(arr, at)) {
+      return { success: false, error: "This question has a stable id; send its qid.", code: "qid_required" };
+    }
+    /* By qid the concurrency guard is the question REVISION (what students see: text,
+       options, answer, explanation) — `baseRev` from adminGetQuestion. Same token, same
+       hash as the Supabase side. A qid-less edit keeps the text guard below. */
+    const curRev = qidQuestionRev_(q);
+    const baseRev = String(p.baseRev || "").trim();
+    if (qid && baseRev && baseRev !== curRev) {
+      return { success: false, error: "This question was changed by someone else since you opened it. Reload it.", code: "rev_conflict", currentRev: curRev };
+    }
+    const resolvedQid = qid || qidPrimary_(q).qid;
     if (!qid && view.q.trim() !== expected) {
       return {
         success: false,
@@ -669,8 +685,13 @@ function adminUpdateQuestion(p) {
     /* The snapshot written into every matching report row. Without this the
        loop below throws a ReferenceError inside a try/catch, so the sheet
        silently never receives the before/after pair the console reads. */
+    /* The revision this edit produces, computed on a copy BEFORE anything is written. */
+    const projected = JSON.parse(JSON.stringify(q));
+    projected[view.keys.text] = newQ; projected[view.keys.options] = options;
+    projected[view.keys.correct || "correct"] = correct; projected[view.keys.explanation || "explanation"] = explanation;
+    const newRev = qidQuestionRev_(projected);
     const correctedJson = JSON.stringify({
-      uid: editUid, at: editAt,
+      uid: editUid, at: editAt, baseRev: curRev, newRev: newRev,
       before: beforeEdit,
       after: {
         question: newQ, options: options,
@@ -724,16 +745,16 @@ function adminUpdateQuestion(p) {
        request on the script lock for the length of fifty writes. */
     try {
       const reportsSheet = getQReportsSheet_();
-      const uid = fileId + "_" + index;
       const lastRow = reportsSheet.getLastRow();
       if (lastRow > 1) {
-        /* Scan the uid column server-side. Reading every report row here made
-           each save slower as the report sheet grew. */
-        const hits = reportsSheet.getRange(2, 2, lastRow - 1, 1)
-          .createTextFinder(uid)
-          .matchCase(true)
-          .matchEntireCell(true)
-          .findAll();
+        /* Match reports by the question's IDENTITY. The old lookup keyed on
+           "<fileId>_<requested position>", which misses reports filed while the question
+           sat elsewhere AND stamps reports about whatever else sits at that position now.
+           Without a qid (legacy question) the located position is the only identity left. */
+        const byQid = !!resolvedQid;
+        const hits = byQid
+          ? reportsSheet.getRange(2, 19, lastRow - 1, 1).createTextFinder(resolvedQid).matchCase(false).matchEntireCell(true).findAll()
+          : reportsSheet.getRange(2, 2, lastRow - 1, 1).createTextFinder(fileId + "_" + at).matchCase(true).matchEntireCell(true).findAll();
         if (hits.length) {
           const rows = hits.map(function (r) { return r.getRow(); });
           const lo = Math.min.apply(null, rows);
@@ -742,6 +763,11 @@ function adminUpdateQuestion(p) {
           const vals = col.getValues();
           rows.forEach(function (rowIdx) { vals[rowIdx - lo][0] = correctedJson; });
           col.setValues(vals);
+          /* The snapshot changed, so these reports "changed": move their cursor. */
+          const stampCol = reportsSheet.getRange(lo, 20, hi - lo + 1, 1);
+          const stampVals = stampCol.getValues();
+          rows.forEach(function (rowIdx) { stampVals[rowIdx - lo][0] = editAt; });
+          stampCol.setValues(stampVals);
           _invalidateSheet_(QREPORTS_SHEET);
         }
       }
@@ -758,20 +784,22 @@ function adminUpdateQuestion(p) {
        for the nightly sheet sync. */
     try {
       mirrorCorrectionToSupabase_(
-        fileId, index, beforeEdit,
+        fileId, at, beforeEdit,
         { question: newQ, options: options, correctIndex: correct, explanation: explanation },
         editUid, editAt, actor, String(p.reportId || ""),
-        String(p.reportReason || ""), String(p.adminNote || "")
+        String(p.reportReason || ""), String(p.adminNote || ""),
+        resolvedQid, curRev, newRev
       );
     } catch (e) {
       console.error("adminUpdateQuestion: Supabase mirror failed:", e);
     }
 
+    qidRegisterFile_(fileId, arr);   /* keep the qid registry (rev, derived position) current */
     setSettingValue_("contentVersion", String(Date.now()));
     markFileCorrected_(fileId);
-    logAction_(actor, "Edit Question", fileId + "#" + index,
+    logAction_(actor, "Edit Question", fileId + "#" + at,
       "Question text, options, answer or explanation changed (daily backup + Drive revision)");
-    return { success: true };
+    return { success: true, qid: resolvedQid || null, rev: newRev };
   });
 }
 
@@ -785,13 +813,13 @@ function adminUpdateQuestion(p) {
    Existing rows are updated in place. A legacy report that only ever lived in
    the sheet gets a resolved row with the report id, so the console's follow-up
    status call and the pipeline can both find it. */
-function mirrorCorrectionToSupabase_(fileId, index, beforeEdit, after, editUid, editAt, actor, reportId, reason, note) {
+function mirrorCorrectionToSupabase_(fileId, index, beforeEdit, after, editUid, editAt, actor, reportId, reason, note, qid, baseRev, newRev) {
   if (typeof bridgeRequest_ !== "function") return false;
 
   const enc = encodeURIComponent;
   const uid = fileId + "_" + index;
   const snapshot = JSON.stringify({
-    uid: editUid, at: editAt,
+    uid: editUid, at: editAt, baseRev: baseRev || "", newRev: newRev || "",
     before: beforeEdit,
     after: {
       question: after.question, options: after.options,
@@ -811,8 +839,16 @@ function mirrorCorrectionToSupabase_(fileId, index, beforeEdit, after, editUid, 
     file_id: fileId
   };
 
+  /* One qid-keyed event in the log the pipeline reads, exactly like a Supabase-side edit
+     (so a correction made here reaches the pipeline and the other backend identically). */
+  mirrorCorrectionEvent_(fileId, uid, qid, beforeEdit, after, editAt, actor, reportId, note, baseRev, newRev);
+
+  /* Reports are matched by the question's qid when it has one. "<file>_<position>" is only
+     the fallback for a legacy question with no id — position alone would hit the wrong rows. */
   const byUid = bridgeRequest_("patch",
-    "/rest/v1/question_reports?uid=eq." + enc(uid) + "&file_id=eq." + enc(fileId), patch);
+    qid
+      ? "/rest/v1/question_reports?qid=eq." + enc(qid)
+      : "/rest/v1/question_reports?uid=eq." + enc(uid) + "&file_id=eq." + enc(fileId), patch);
   if (byUid.ok && Array.isArray(byUid.data) && byUid.data.length) {
     if (!reportId || byUid.data.some(function (r) { return String(r.id) === reportId; })) return true;
   }
@@ -1100,4 +1136,26 @@ const REPORT_ROUTES_ = {
 function REPORT_HANDLE_(action, params) {
   const fn = REPORT_ROUTES_[String(action || "").toLowerCase()];
   return fn ? fn(params || {}) : null;
+}
+
+/* Writes the qid-keyed correction event. (dedupe_key, corrected_at) is unique, so a retry is
+   a harmless 409. base_rev/new_rev are retried without if the 20261117 migration has not been
+   applied yet, so the mirror never fails just because Supabase is one migration behind. */
+function mirrorCorrectionEvent_(fileId, uid, qid, before, after, editAt, actor, reportId, note, baseRev, newRev) {
+  if (typeof bridgeRequest_ !== "function") return false;
+  const row = {
+    dedupe_key: qid ? "q" + qid : "u" + uid,
+    uid: qid ? "q" + qid : uid,
+    qid: qid || "", file_id: fileId, report_id: reportId || "",
+    corrected_at: editAt,
+    before: JSON.stringify(before), after: JSON.stringify(after),
+    note: note || "", admin_user: actor, created_at: new Date().toISOString(),
+    base_rev: baseRev || "", new_rev: newRev || ""
+  };
+  let r = bridgeRequest_("post", "/rest/v1/correction_events", row);
+  if (!r.ok && r.status !== 409 && !r.disabled) {
+    delete row.base_rev; delete row.new_rev;
+    r = bridgeRequest_("post", "/rest/v1/correction_events", row);
+  }
+  return !!(r.ok || r.status === 409);
 }

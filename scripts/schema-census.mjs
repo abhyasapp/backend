@@ -41,6 +41,10 @@ export function census(functionDir) {
           for (; b < stmt.length; b++) { const c = stmt[b]; if ('([{'.includes(c)) d++; else if (')]}'.includes(c)) { d--; if (d < 0) break; } }
           let buf = ''; d = 0;
           for (const ch of stmt.slice(a, b)) { if ('([{'.includes(ch)) d++; else if (')]}'.includes(ch)) d--; buf += d <= 1 ? ch : ' '; }
+          // A bare variable as the row argument (`.upsert(part, {...})`) carries no literal
+          // keys to read: drop it instead of mistaking the identifier for a column. Those writes
+          // are checked against the real schema by tests/handlers/qid-core.test.mjs instead.
+          buf = buf.replace(/^\s*[A-Za-z_][\w.]*\s*(?=,|$)/, '');
           for (const key of buf.matchAll(/(?:^|[{,]\s*)([a-z][a-z_0-9]*)\s*(?=[:,}])/g)) if (!KW.has(key[1])) add(t, key[1]);
         }
     }

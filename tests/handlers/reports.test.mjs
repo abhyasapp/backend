@@ -61,7 +61,9 @@ r = await call(R.adminapplycorrections, {
   ]),
 });
 assert.equal(r.success, true);
-assert.deepEqual(r.results, [{ key: 'q48213', ok: true, alsoClosed: 1 }, { key: 'q48214', ok: true }]);
+// Each result now also reports the question's NEW revision (the optimistic-concurrency token).
+assert.ok(r.results.every((x) => /^[0-9a-f]{14}$/.test(x.rev)));
+assert.deepEqual(r.results.map(({ rev, ...rest }) => rest), [{ key: 'q48213', ok: true, alsoClosed: 1 }, { key: 'q48214', ok: true }]);
 let saved = JSON.parse(DB.storage['subjective-content/fileA']);
 assert.equal(saved.questions[0].q, '13. New stem');
 assert.equal(saved.questions[0].correct, 1);
@@ -167,11 +169,28 @@ r = await call(R.adminapplycorrections, {
     after: { question: 'Should not save', options: ['a', 'b'], correctIndex: 1 },
   }]),
 });
+// The question at this position carries a stable id, so a position-only write is refused outright.
+assert.equal(r.results[0].ok, false);
+assert.equal(r.results[0].code, 'qid_required');
+assert.equal(DB.tables.correction_events.length, 2);
+assert.equal(JSON.parse(DB.storage['subjective-content/fileA']).questions[0].q, '13. New stem');
+ok('a position-only write to a question with a stable id is refused (qid_required)');
+
+// Legacy files whose questions have NO ids still use the expectedQ text guard.
+DB.storage['subjective-content/legacyNoIds'] = JSON.stringify({ questions: [{ q: 'Old text', options: ['a', 'b'], correct: 0 }] });
+r = await call(R.adminapplycorrections, {
+  username: 'admin', token: 'admin-token',
+  items: JSON.stringify([{
+    key: 'legacy0', uid: 'legacyNoIds_0', fileId: 'legacyNoIds', index: 0,
+    correctedAt: '2026-11-14T10:06:00.000Z', expectedQ: 'Stale text',
+    after: { question: 'Should not save', options: ['a', 'b'], correctIndex: 1 },
+  }]),
+});
 assert.equal(r.results[0].ok, false);
 assert.equal(r.results[0].conflict, true);
 assert.equal(DB.tables.correction_events.length, 2);
-assert.equal(JSON.parse(DB.storage['subjective-content/fileA']).questions[0].q, '13. New stem');
-ok('a stale expectedQ is refused without changing the file');
+assert.equal(JSON.parse(DB.storage['subjective-content/legacyNoIds']).questions[0].q, 'Old text');
+ok('a stale expectedQ is still refused for an id-less legacy question, without changing the file');
 
 r = await call(R.synccorrectionssince, { key: 'pipeline-test-key', since: 0, limit: 500 });
 assert.equal(r.success, true);

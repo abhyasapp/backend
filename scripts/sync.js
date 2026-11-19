@@ -43,14 +43,30 @@ const TABLES = {
   weekly_sets:            { direction: 'supabase-wins', pk: ['id'], tombstone: { created: 'uploaded_at' } },
   weekly_starts:          { direction: 'earliest-wins', pk: ['username', 'weekly_id'], ts: ['started_at'] },
   weekly_attempts:        { direction: 'supabase-wins', pk: ['username', 'weekly_id'] },
-  question_reports:       { direction: 'gas-wins',      pk: ['id'] },
+  // WAS 'gas-wins': the sheet overwrote Supabase on every sync, silently reverting any report
+  // resolved on the Supabase side (e.g. by the pipeline's resolvereports). Whole-row events, so
+  // newest change wins; updated_at is server-stamped on Supabase and script-stamped on the sheet,
+  // with resolved_at / reported_at as the fallback for rows that predate it.
+  question_reports:       { direction: 'newer-wins',    pk: ['id'], ts: ['updated_at', 'resolved_at', 'reported_at'] },
   subjective_submissions: { direction: 'newer-wins',    pk: ['id'], ts: ['graded_at', 'submitted_at'] },
   study_docs:             { direction: 'supabase-wins', pk: ['id'], tombstone: { created: 'uploaded_at' } },
+  // ── qid-centric tables (docs/QID-CONTRACT.md) ──
+  question_index:         { direction: 'supabase-wins', pk: ['qid'] },
+  // Notes / bookmarks / flags / mistakes: merged per FIELD by each field's own timestamp, never
+  // whole-row newest-wins (that would drop a note edited on one backend when a bookmark was
+  // toggled on the other). Counters take the larger value; see mergeQstate.
+  user_qstate:            { direction: 'union',         pk: ['username', 'qid'], merge: 'qstate' },
+  // Immutable events: both sides' rows are kept (union).
+  answer_events:          { direction: 'union',         pk: ['username', 'qid', 'at'] },
+  // Derived from answer_events. Never merged: rebuilt on each side by the `rebuildqidstats` action
+  // after a sync, so a count is never double-added or lost.
+  qid_stats:              { direction: 'supabase-wins', pk: ['qid'] },
 };
 
 /* GAS sheet column → Supabase column. Identical names pass through. */
 const RENAMES_FROM_GAS = {
   users: {
+    contactType: 'contact_type',   // was missing: this column never synced between the backends
     passHash: 'pass_hash', createdAt: 'created_at', approvedAt: 'approved_at',
     trialExpiresAt: 'trial_expires_at', paymentStatus: 'payment_status',
     permanentAccess: 'permanent_access', accessType: 'access_type',
@@ -72,13 +88,14 @@ const RENAMES_FROM_GAS = {
   push_tokens: { fcmToken: 'fcm_token', updatedAt: 'updated_at' },
   weekly_sets: {
     fileId: 'file_id', chapterLabel: 'chapter_label', uploadedBy: 'uploaded_by',
-    uploadedAt: 'uploaded_at', releaseAt: 'release_at',
+    uploadedAt: 'uploaded_at', releaseAt: 'release_at', fileRev: 'file_rev',
   },
   weekly_starts: { weeklyId: 'weekly_id', startedAt: 'started_at' },
   weekly_attempts: {
     weeklyId: 'weekly_id', answersJson: 'answers_json', totalQuestions: 'total_questions',
     correctClaimed: 'correct_claimed', skippedCount: 'skipped_count',
     startedAt: 'started_at', submittedAt: 'submitted_at', durationSec: 'duration_sec',
+    answersByQid: 'answers_by_qid', fileRev: 'file_rev',
   },
   question_reports: {
     fileId: 'file_id', questionSnapshot: 'question_snapshot', reportedBy: 'reported_by',
@@ -86,6 +103,7 @@ const RENAMES_FROM_GAS = {
     correctIndex: 'correct_index', chosenIndex: 'chosen_index',
     appVersion: 'app_version', resolvedAt: 'resolved_at', resolvedBy: 'resolved_by',
     correctedSnapshot: 'corrected_snapshot',
+    updatedAt: 'updated_at',
   },
   subjective_submissions: {
     questionId: 'question_id', questionText: 'question_text', questionMarks: 'question_marks',
@@ -99,6 +117,14 @@ const RENAMES_FROM_GAS = {
     sizeBytes: 'size_bytes', sortOrder: 'sort_order', uploadedBy: 'uploaded_by',
     uploadedAt: 'uploaded_at', updatedAt: 'updated_at',
   },
+  question_index: { fileId: 'file_id', canonicalQid: 'canonical_qid', updatedAt: 'updated_at' },
+  user_qstate: {
+    fileId: 'file_id', noteAt: 'note_at', bookmarkedAt: 'bookmarked_at', flaggedAt: 'flagged_at',
+    inMistakes: 'in_mistakes', mistakesAt: 'mistakes_at', lastResult: 'last_result', lastAt: 'last_at',
+    updatedAt: 'updated_at',
+  },
+  answer_events: { fileId: 'file_id', sessionId: 'session_id' },
+  qid_stats: { updatedAt: 'updated_at' },
 };
 
 const RENAMES_TO_GAS = {};
@@ -216,6 +242,29 @@ function mergeHistory(s, g) {
   return out;
 }
 
+/* user_qstate: per-field last-writer-wins by each field's own timestamp (the same rule the
+   handlers apply, qstate-core.ts). Counters take the larger value; last_* follow last_at. */
+const QSTATE_FIELD_PAIRS = [['note', 'note_at'], ['bookmarked', 'bookmarked_at'], ['flagged', 'flagged_at'], ['in_mistakes', 'mistakes_at']];
+function mergeQstate(s, g) {
+  if (!s) return g;
+  if (!g) return s;
+  const out = { ...g, ...s };                                    // start from Supabase, fill GAS-only keys
+  QSTATE_FIELD_PAIRS.forEach(([val, at]) => {
+    const sa = String(s[at] || ''), ga = String(g[at] || '');
+    const gWins = ga > sa;
+    out[val] = gWins ? g[val] : s[val];
+    out[at] = gWins ? g[at] : s[at];
+  });
+  out.attempts = String(Math.max(Number(s.attempts || 0), Number(g.attempts || 0)));
+  out.wrong = String(Math.max(Number(s.wrong || 0), Number(g.wrong || 0)));
+  const gLater = String(g.last_at || '') > String(s.last_at || '');
+  out.last_at = gLater ? g.last_at : s.last_at;
+  out.last_result = gLater ? g.last_result : s.last_result;
+  out.file_id = s.file_id || g.file_id || '';
+  out.updated_at = String(s.updated_at || '') >= String(g.updated_at || '') ? s.updated_at : g.updated_at;
+  return out;
+}
+
 /* Email verified on either side stays verified if the email did not change. */
 function keepVerifiedEmail(winner, s, g) {
   if (!winner || !g || !s) return winner;
@@ -276,7 +325,7 @@ function mergeTable(name, supaRows, gasRowsRaw, ctx = {}) {
         break;
       }
       case 'union':
-        winner = rule.merge === 'history' ? mergeHistory(s, g) : (s || g);
+        winner = rule.merge === 'history' ? mergeHistory(s, g) : rule.merge === 'qstate' ? mergeQstate(s, g) : (s || g);
         break;
       default:
         winner = s || g;
@@ -528,7 +577,7 @@ async function main() {
 module.exports = {
   TABLES, RENAMES_FROM_GAS, RENAMES_TO_GAS,
   timeOf, pkOf, norm, gasToSupabase, supabaseToGas, coerceForSupabase, shapeForSupabase,
-  mergeHistory, keepVerifiedEmail, mergeTable, groupBySignature, chunk,
+  mergeHistory, mergeQstate, keepVerifiedEmail, mergeTable, groupBySignature, chunk,
   createSupabase, createGas, run,
 };
 

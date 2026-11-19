@@ -1,19 +1,63 @@
-# Changes (v1.70 Supabase · v1.46 Apps Script)
+# Changes (v1.70 Supabase · v1.47 Apps Script)
 
-## 16 November 2026 — v1.70: corrections go to Neon
+## 18 November 2026 — v1.70 / v1.47: the question id is the key for everything
 
-- Reports stay where they are, in Supabase. Once a report's question id is known,
-  `adminNeonQuestion` looks the same question up in Neon by its public qn id
-  (`70024.730011`) and returns what Neon currently marks correct.
-- `adminNeonCorrect` applies the fix there: one statement updates the question and
-  writes the previous answer to `applied_corrections`, so the change is traceable
-  to the report. Reports written before public ids existed carry the older
-  internal number, which is matched against `questions.id` instead.
-- The console shows the Neon match in the report sheet and mirrors every pushed
-  correction into Neon, reporting any Neon failure instead of hiding it.
-- Neon is reached over HTTPS (`npm:@neondatabase/serverless`) with
-  `NEON_DATABASE_URL`. Without that secret the actions answer `neonMissing` and
-  the console says so rather than failing silently.
+**Apply in this order:** run the two migrations (`20261117000000_qid_core.sql`,
+`20261118000000_report_updated_at.sql`), deploy the Edge Function, add the four new
+files to the Apps Script project (`qid-core.gs`, `qid.gs`, `admin-reports.gs`, plus the
+edited `code.gs` / `report.gs` / `sync.gs` / `supabase-bridge.gs`) and publish a **new
+version of the existing deployment** (same /exec URL). `?action=ping` reports 1.70 / 1.47.
+
+### Identity (qid), not position or file
+- One shared definition of a question's identity (`_shared/qid.ts` ⇄ `gas/qid-core.gs`),
+  one traversal order for a content file (there were three, so positions could disagree),
+  and a per-question **revision** hash (text, options, answer, explanation — never position).
+- **Weekly sets are scored by qid** against a paper frozen at creation (ordered qids +
+  revision). A reordered, corrected or shortened file can no longer re-map a student's
+  answers onto different questions; a removed question is *voided*, not counted wrong.
+  Legacy positional payloads still work (converted by the same core). `adminrescoreweeklyset`
+  applies a correction explicitly (dry-run by default). Changing a set's file after students
+  attempted it is refused.
+- **Corrections** are located by qid and guarded by a per-question revision (`baseRev` →
+  `rev_conflict`); a position-only write to a question that has a stable id is refused
+  (`qid_required`). Logged corrections are overlaid by qid onto the lagging CDN copy so an
+  admin never edits a stale question.
+- **Per-student question state** (notes, bookmarks, flags, mistake list) and **answer events**
+  are keyed by qid and merged per *field* (`syncqstate`, `recordanswers`); `qid_stats` counts
+  distinct students, so one account cannot make a question look "hard". Merged/retired qids
+  redirect to a canonical qid (`question_index`, `resolveqids`).
+- `getqidpatches` delivers corrections to the app as qid-keyed patches.
+
+### Both backends, same behaviour
+- Apps Script gained every endpoint above with the same JSON, plus the weekly changes.
+  `tests/parity*.test.mjs` run the *same* inputs through the real Supabase handlers and the
+  real Apps Script handlers (on a Sheets mock) and require identical output; the pure core
+  is fuzzed (3,000+ random files/payloads) for byte-identical qids, revisions and scores.
+- **Fixed backend divergences found while doing this:** Apps Script re-scored weekly results
+  live by position (only when answer counts matched) while Supabase froze them; Apps Script
+  stamped correction snapshots onto reports by `<file>_<requested position>`, missing reports
+  filed elsewhere and stamping unrelated ones; the Supabase mirror of a correction was
+  position-keyed and wrote no qid-keyed event; `users.contactType` never synced
+  (missing rename); `question_reports` synced `gas-wins` and would have reverted any
+  resolution made on the Supabase side (now `newer-wins` on a server-stamped `updated_at`).
+
+### Pipeline endpoints (docs/PIPELINE-CONTRACT.md)
+- `syncreportssince` rewritten: reports **changed** since a cursor (new, resolved, re-opened)
+  by a database-stamped `updated_at`; inclusive cursor; `now` is the newest change returned.
+  (The old version filtered `reported_at` only, returned no `now`, and fetched the first N rows
+  by random id before filtering.) New: `resolvereports`, `admincorrect`, `rebuildqidstats`,
+  `ingestquestionindex`. `scripts/push-question-index.mjs` pushes the registry to both backends.
+
+### Faster
+- Login: the two rate-limit reads and the account lookup run together; the post-login writes
+  overlap. `authUser` no longer reads `pass_hash` on every request (five handlers opt in).
+  `bootstrap` returns session + settings + corrections + weekly sets in one request.
+
+### Also fixed
+- `tests/handlers/student-overview.test.mjs` failed on 2026-11-18 by itself (7-day inactivity
+  boundary against a hard-coded date); its clock is now pinned.
+- The GAS-column ↔ Postgres-column test could never fail (it filtered before checking); it is
+  now strict for every table and also reads `report.gs` / `qid.gs`.
 
 ## 16 November 2026 — v1.69: an admin can read content
 

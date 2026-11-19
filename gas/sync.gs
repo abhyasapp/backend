@@ -39,7 +39,11 @@ function syncTables_() {
   weekly_attempts:        { get: function () { return getWeeklyAttemptsSheet_(); },  name: WEEKLYATTEMPTS_SHEET,   key: ["username", "weeklyId"] },
   question_reports:       { get: function () { return getQReportsSheet_(); },        name: QREPORTS_SHEET,         key: ["id"] },
   subjective_submissions: { get: function () { return getSubjSubmissionsSheet_(); }, name: SUBJ_SUBMISSIONS_SHEET, key: ["id"] },
-  study_docs:             { get: function () { return getStudyDocsSheet_(); },       name: STUDYDOCS_SHEET,        key: ["id"] }
+  study_docs:             { get: function () { return getStudyDocsSheet_(); },       name: STUDYDOCS_SHEET,        key: ["id"] },
+  question_index:         { get: function () { return getQuestionIndexSheet_(); },   name: QINDEX_SHEET,           key: ["qid"] },
+  user_qstate:            { get: function () { return getUserQStateSheet_(); },      name: QSTATE_SHEET,           key: ["username", "qid"] },
+  answer_events:          { get: function () { return getAnswerEventsSheet_(); },    name: QEVENTS_SHEET,          key: ["username", "qid", "at"] },
+  qid_stats:              { get: function () { return getQidStatsSheet_(); },        name: QSTATS_SHEET,           key: ["qid"] }
   };
 }
 

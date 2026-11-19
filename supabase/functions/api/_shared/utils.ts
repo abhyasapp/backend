@@ -2,6 +2,7 @@ import { supabase } from './db.ts';
 import { PROGRESS_HISTORY_MIN_GAP_MS, PROGRESS_GZ_PREFIX, CORRECTIONS_SETTING_KEY, MAX_CORRECTIONS_KEPT } from './config.ts';
 import { hasTraversalSegment } from './pure.ts';
 import { isPdfBytes } from './crypto.ts';
+import { flattenQuestions, correctOf } from './qid.ts';
 
 // ── progress ───────────────────────────────────────────────────────
 export function sameRevision(a: unknown, b: unknown): boolean {
@@ -89,6 +90,13 @@ export function weeklyMarks(correct: number, skipped: number, total: number) {
   };
 }
 
+function parseJsonArray(v: unknown): string[] {
+  try { const a = JSON.parse(String(v || '[]')); return Array.isArray(a) ? a.map(String) : []; } catch { return []; }
+}
+function parseJsonObject(v: unknown): Record<string, number | null> {
+  try { const o = JSON.parse(String(v || '{}')); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; } catch { return {}; }
+}
+
 export function rowToWeeklyAttempt(row: Record<string, unknown>) {
   let answers: unknown[] = [];
   try { answers = JSON.parse(String(row.answers_json || '[]')); } catch { /* ignore */ }
@@ -98,6 +106,12 @@ export function rowToWeeklyAttempt(row: Record<string, unknown>) {
   return {
     weeklyId: String(row.weekly_id || ''),
     answers,
+    // qid-keyed view of the same attempt: the paper the student saw, what they
+    // chose per question id, and any questions voided since. Position-free.
+    answersByQid: parseJsonObject(row.answers_by_qid),
+    qids: parseJsonArray(row.qids),
+    voided: parseJsonArray(row.voided),
+    fileRev: String(row.file_rev || ''),
     total,
     correct,
     pct: weeklyMarks(correct, skipped, total).pct,
@@ -119,35 +133,16 @@ export function rowToWeeklySet(row: Record<string, unknown>) {
     uploadedBy: String(row.uploaded_by || ''),
     uploadedAt: String(row.uploaded_at || ''),
     releaseAt: String(row.release_at || ''),
+    qids: parseJsonArray(row.qids),
+    fileRev: String(row.file_rev || ''),
   };
 }
 
 export function extractCorrectAnswers(raw: unknown): (number | string | undefined)[] | null {
-  let qs: unknown[] = [];
-  if (Array.isArray(raw)) qs = raw;
-  else if (raw && typeof raw === 'object') {
-    const o = raw as Record<string, unknown>;
-    qs = (o.questions || o.data || o.quiz || o.items || []) as unknown[];
-    if ((!Array.isArray(qs) || !qs.length) && Array.isArray(o.sections)) {
-      qs = (o.sections as Array<Record<string, unknown>>)
-        .reduce((acc: unknown[], s) => acc.concat(Array.isArray(s?.questions) ? s.questions : []), []);
-    }
-  }
+  const qs = flattenQuestions(raw);
   if (!Array.isArray(qs)) return null;
-  return qs.map(q => {
-    if (!q || typeof q !== 'object') return undefined;
-    const o = q as Record<string, unknown>;
-    let c: unknown = o.correct !== undefined ? o.correct
-      : o.answer !== undefined ? o.answer
-      : o.ans    !== undefined ? o.ans
-      : o.Answer;
-    if (typeof c === 'string' && /^[a-eA-E]$/.test(c.trim())) {
-      c = 'abcde'.indexOf(c.trim().toLowerCase());
-    }
-    return c as number | string | undefined;
-  });
+  return qs.map(q => correctOf(q));
 }
-
 export function scoreAnswers(answers: (number | null)[], key: (number | string | undefined)[]): number {
   let correct = 0;
   answers.forEach((a, i) => {

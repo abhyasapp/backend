@@ -64,22 +64,26 @@ export async function login(params: Record<string, unknown>, req: Request) {
   const ip = clientIp(req);
   const rlUser = 'login:u:' + identifier.toLowerCase();
   const rlIp = 'login:ip:' + ip;
-  if ((await rlBlocked(rlUser, 8)) || (await rlBlocked(rlIp, 40))) return json(RL_TOO_MANY);
+  // The two rate-limit reads and the account lookup are independent: run them together
+  // (3 sequential round trips → 1) instead of one after another.
+  const [blockedUser, blockedIp, user] = await Promise.all([
+    rlBlocked(rlUser, 8), rlBlocked(rlIp, 40), findUserByIdentifier(identifier),
+  ]);
+  if (blockedUser || blockedIp) return json(RL_TOO_MANY);
 
-  const user = await findUserByIdentifier(identifier);
   if (!user) {
-    await pbkdf2(password, 'timing-equaliser', PW_ITERATIONS);
-    await rlHit(rlUser, RL_WINDOW_MS); await rlHit(rlIp, RL_WINDOW_MS);
+    // Same cost as a real check, so response time does not reveal whether the account exists.
+    await Promise.all([pbkdf2(password, 'timing-equaliser', PW_ITERATIONS), rlHit(rlUser, RL_WINDOW_MS), rlHit(rlIp, RL_WINDOW_MS)]);
     return json({ success: false, error: 'Invalid username or password.' });
   }
 
   const v = await verifyPassword(password, String(user.pass_hash || ''));
   if (!v.ok) {
-    await rlHit(rlUser, RL_WINDOW_MS); await rlHit(rlIp, RL_WINDOW_MS);
+    await Promise.all([rlHit(rlUser, RL_WINDOW_MS), rlHit(rlIp, RL_WINDOW_MS)]);
     return json({ success: false, error: 'Invalid username or password.' });
   }
 
-  await rlClear(rlUser);
+  const cleared = rlClear(rlUser);               // independent of everything below: overlap it
   if (v.upgraded) {
     const oldHash = String(user.pass_hash || '');
     await supabase.from('users').update({ pass_hash: v.upgraded }).eq('username', user.username);
@@ -88,9 +92,9 @@ export async function login(params: Record<string, unknown>, req: Request) {
     await supabase.from('admins').update({ pass_hash: v.upgraded }).eq('username', user.username).eq('pass_hash', oldHash);
     user.pass_hash = v.upgraded;
   }
-  if (String(user.status) === 'rejected') return json({ success: false, error: 'Account rejected. Contact admin.' });
+  if (String(user.status) === 'rejected') { await cleared; return json({ success: false, error: 'Account rejected. Contact admin.' }); }
 
-  const token = await issueUserToken(String(user.username));
+  const [token] = await Promise.all([issueUserToken(String(user.username)), cleared]);
   const access = computeAccess(user);
   const out: Record<string, unknown> = { success: true, user: publicUser(user), token };
 
@@ -269,7 +273,7 @@ export async function logoutotherdevices(params: Record<string, unknown>) {
 }
 
 export async function checkadmincapable(params: Record<string, unknown>) {
-  const auth = await authUser(params);
+  const auth = await authUser(params, { withHash: true });
   if (!auth.ok) return json(auth.error);
   const { data } = await supabase.from('admins').select('username,pass_hash').eq('username', auth.username).limit(1);
   const admin = data && data[0] ? data[0] as Record<string, unknown> : null;
@@ -278,7 +282,7 @@ export async function checkadmincapable(params: Record<string, unknown>) {
 }
 
 export async function adminswitchfromuser(params: Record<string, unknown>) {
-  const auth = await authUser(params);
+  const auth = await authUser(params, { withHash: true });
   if (!auth.ok) return json(auth.error);
   const username = auth.username;
   const rlKey = 'aswitch:' + username.toLowerCase();

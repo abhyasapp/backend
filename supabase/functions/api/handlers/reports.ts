@@ -6,8 +6,12 @@ import { randId } from '../_shared/crypto.ts';
 import { markFileCorrected, readProgress, extractCorrectAnswers } from '../_shared/utils.ts';
 import { chunk } from '../_shared/pure.ts';
 import { rlBlocked, rlHit, RL_TOO_MANY } from '../_shared/rate-limit.ts';
-import { QID_FIELDS, qidString, qidMatches } from '../_shared/qid.ts';
-import { overlayQuestions } from '../_shared/corrections.ts';
+import { loadFileForEdit, applyAfter } from '../_shared/qfile.ts';
+import { registerFileIndex, qidAtPosition } from '../_shared/qindex.ts';
+import {
+  qidString, qidMatches, flattenQuestions, questionIndexFor, positionWriteAllowed,
+  primaryQid, questionRev, buildQidIndex, qidCoverage,
+} from '../_shared/qid.ts';
 
 function safeJsonParse<T = unknown>(s: unknown, fallback: T): T {
   if (typeof s !== 'string' || !s) return fallback;
@@ -15,14 +19,46 @@ function safeJsonParse<T = unknown>(s: unknown, fallback: T): T {
 }
 
 /** Identity of one per-question result inside a progress blob: the stable qid
-    when the client recorded it, the positional uid otherwise. A correction or
-    a reorder renumbers uid but never the qid, so qid is what keeps a
-    question's history together. */
-function qresIdentity(qr: any): { id: string; qid: string; uid: string } | null {
-  const qid = qidString(qr?.qid) || qidString(qr?.qnid) || qidString(qr?.publicId);
+    when the client recorded it, else — as a LEGACY bridge only — the qid that
+    other results learned for the same positional uid, else the uid itself. A
+    correction or a reorder renumbers uid but never the qid, so qid is what
+    keeps a question's history together; the bridge stops one question from
+    splitting into a qid bucket and a uid bucket while old data ages out. */
+function qresIdentity(qr: any, uidToQid?: Map<string, string>): { id: string; qid: string; uid: string } | null {
+  let qid = qidString(qr?.qid) || qidString(qr?.qnid) || qidString(qr?.publicId);
   const uid = String(qr?.uid || '');
+  if (!qid && uid && uidToQid) qid = uidToQid.get(uid) || '';
   if (!qid && !uid) return null;
   return { id: qid || uid, qid, uid };
+}
+
+/** Reads every student's progress once: a flat list of (user, result) and the
+    unambiguous uid → qid pairs seen. A uid that maps to two different qids
+    (its position was reused after a reorder) is dropped, never guessed. */
+async function scanProgressQres(rows: Array<{ username?: unknown; data?: unknown }>) {
+  const flat: Array<{ user: string; qr: any }> = [];
+  const seen = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const row of rows) {
+    const user = String(row.username || '');
+    const parsed = await readProgress(row.data);   // understands gz1: compressed rows
+    const sessions = Array.isArray(parsed?.prog?.sessions) ? parsed.prog.sessions : [];
+    for (const s of sessions) {
+      const qres = (s as any)?.qres;
+      if (!Array.isArray(qres)) continue;
+      for (const qr of qres) {
+        flat.push({ user, qr });
+        const q = qidString(qr?.qid) || qidString(qr?.qnid) || qidString(qr?.publicId);
+        const u = String(qr?.uid || '');
+        if (q && u) {
+          const prev = seen.get(u);
+          if (prev && prev !== q) ambiguous.add(u); else seen.set(u, q);
+        }
+      }
+    }
+  }
+  ambiguous.forEach(u => seen.delete(u));
+  return { flat, uidToQid: seen };
 }
 
 /* A report made before questions had ids stores only the text the student saw.
@@ -88,19 +124,8 @@ function reportView(r: Record<string, any>) {
   };
 }
 
-/** Position of a question inside its file, resolved by stable identity:
-    1. the internal qid, 2. the public qn id on any id-bearing field, 3. the
-    position — and only when the caller supplied no id at all. A supplied id
-    that matches nothing returns -1, so a correction can never silently land on
-    whatever question now happens to sit at that position. */
-function questionIndexFor(arr: any[], index: number, qid: string): number {
-  if (!qid) return index;
-  for (const field of QID_FIELDS) {
-    const found = arr.findIndex(q => qidMatches(q?.[field], qid));
-    if (found >= 0) return found;
-  }
-  return -1;
-}
+const HARD_MIN_ATTEMPTS = 20;   // answers before a question can be called "hard"
+const HARD_MIN_STUDENTS = 5;    // ...by at least this many different students
 
 async function correctionExists(dedupeKey: string, correctedAt: string): Promise<boolean> {
   const { data } = await supabase.from('correction_events').select('id')
@@ -169,7 +194,15 @@ export async function reportquestion(params: Record<string, unknown>) {
   // A question is identified by its stable qid first, the public qn id second:
   // a report filed after its file was reordered dedupes against the earlier one
   // even though the position (uid) changed.
-  const qid = qidString(params.qid) || qidString(params.qnid) || qidString(params.publicId) || qidString(params.publicQid);
+  let qid = qidString(params.qid) || qidString(params.qnid) || qidString(params.publicId) || qidString(params.publicQid);
+  // An old client that sent only the positional uid: attach the qid the registry
+  // says sits there now, so the report is still filed against a question id.
+  // (Best effort and flagged below — the uid position can be stale.)
+  let qidSource = qid ? 'client' : '';
+  if (!qid) {
+    const m = uid.match(/^(.+)_(\d+)$/);
+    if (m) { qid = await qidAtPosition(m[1], Number(m[2])); if (qid) qidSource = 'registry_by_position'; }
+  }
 
   const dup = supabase.from('question_reports').select('id').eq('reported_by', auth.username).eq('status', 'open');
   const { data: existing } = await (qid ? dup.eq('qid', qid) : dup.eq('uid', uid)).limit(1);
@@ -218,7 +251,7 @@ export async function reportquestion(params: Record<string, unknown>) {
     resolved_at: '', resolved_by: '', corrected: '', corrected_snapshot: '',
   });
   if (error) return json({ success: false, error: dbMsg(error) });
-  return json({ success: true, id, reportId: id });
+  return json({ success: true, id, reportId: id, qid: qid || null, qidSource: qidSource || null });
 }
 
 export async function getmyreports(params: Record<string, unknown>) {
@@ -284,33 +317,42 @@ export async function gethardquestions(params: Record<string, unknown>) {
     }
   } catch { /* recompute */ }
 
+  // Preferred source: the qid-keyed statistics (qid_stats, fed by recordanswers).
+  // Cheap, qid-native, and counts DISTINCT students so one account cannot make a
+  // question look hard on its own.
+  try {
+    const stats = await selectAll('qid_stats', '*', { orderBy: 'qid', max: 200000 });
+    if (stats.length) {
+      const qidMap: Record<string, number> = {};
+      for (const r of stats) {
+        const n = Number(r.attempts || 0), w = Number(r.wrong || 0), u = Number(r.students || 0);
+        if (n >= HARD_MIN_ATTEMPTS && u >= HARD_MIN_STUDENTS) qidMap[String(r.qid)] = Math.round((w / n) * 100);
+      }
+      return json({ success: true, map: {}, qidMap, cached: false, source: 'qid_stats' });
+    }
+  } catch { /* table not deployed → legacy scan below */ }
+
+  // Legacy source (clients that do not call recordanswers yet): scan progress blobs.
   let rows: any[];
   try { rows = await selectAll('progress', 'username,data', { orderBy: 'username' }); }
   catch (e) { return json({ success: false, error: dbMsg(e) }); }
-  const tally: Record<string, { n: number; w: number; qid: string; uid: string }> = {};
-  for (const row of rows) {
-    const parsed = await readProgress(row.data);   // understands gz1: compressed rows
-    const sessions = parsed?.prog?.sessions;
-    if (!Array.isArray(sessions)) continue;
-    for (const s of sessions) {
-      const qres = (s as any)?.qres;
-      if (!Array.isArray(qres)) continue;
-      for (const qr of qres) {
-        const entry = qresIdentity(qr);
-        if (!entry) continue;
-        const r = tally[entry.id] || (tally[entry.id] = { n: 0, w: 0, qid: entry.qid, uid: entry.uid });
-        if (!r.qid) r.qid = entry.qid;
-        if (!r.uid) r.uid = entry.uid;
-        r.n++; if (!(qr as any).ok) r.w++;
-      }
-    }
+  const { flat, uidToQid } = await scanProgressQres(rows);
+  const tally: Record<string, { n: number; w: number; qid: string; uid: string; users: Set<string> }> = {};
+  for (const { user, qr } of flat) {
+    const entry = qresIdentity(qr, uidToQid);
+    if (!entry) continue;
+    const r = tally[entry.id] || (tally[entry.id] = { n: 0, w: 0, qid: entry.qid, uid: entry.uid, users: new Set() });
+    if (!r.qid) r.qid = entry.qid;
+    if (!r.uid) r.uid = entry.uid;
+    r.n++; if (!qr.ok) r.w++;
+    if (user) r.users.add(user);
   }
   // `map` stays uid-keyed for older clients; `qidMap` is the stable answer.
   const map: Record<string, number> = {};
   const qidMap: Record<string, number> = {};
   Object.keys(tally).forEach(id => {
     const r = tally[id];
-    if (r.n < 20) return;
+    if (r.n < HARD_MIN_ATTEMPTS || r.users.size < HARD_MIN_STUDENTS) return;
     const pct = Math.round((r.w / r.n) * 100);
     if (r.qid) qidMap[r.qid] = pct;
     if (r.uid) map[r.uid] = pct;
@@ -418,17 +460,6 @@ export async function getreport(params: Record<string, unknown>) {
 }
 
 // ── FIX BUG-07 helper: enumerate questions regardless of file shape ──
-function flattenQuestions(raw: unknown): any[] {
-  if (Array.isArray(raw)) return raw;
-  if (!raw || typeof raw !== 'object') return [];
-  const o = raw as Record<string, unknown>;
-  if (Array.isArray(o.sections)) {
-    const fromSections = (o.sections as any[]).flatMap(s => Array.isArray(s?.questions) ? s.questions : []);
-    if (fromSections.length) return fromSections;
-  }
-  if (Array.isArray(o.questions)) return o.questions;
-  return [];
-}
 
 /* Objective chapter files live on Drive and are mirrored to the public content
    CDN under their Drive id. Older reports store that Drive id, so reading only
@@ -467,33 +498,20 @@ export async function admingetquestion(params: Record<string, unknown>) {
   const qid = qidString(params.qid);
   if (!fileId || isNaN(index) || index < 0) return json({ success: false, error: 'Invalid reference' });
 
-  // Load the file from Supabase Storage first (subjective files), then fall
-  // back to the public CONTENT CDN for objective/Drive-backed files. When a
-  // qid is present the question is located by id, so position is never
-  // trusted — the same position may hold a different question after a reorder.
-  let arr: any[] | null = null;
-  let raw: any = null;
-  try {
-    const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
-    if (error || !blob) throw new Error('not in storage');
-    raw = JSON.parse(await blob.text());
-    arr = flattenQuestions(raw);
-  } catch {
-    if (/^[A-Za-z0-9_-]+$/.test(fileId)) {
-      const base = (Deno.env.get('CONTENT_CDN_BASE') || 'https://cdn.jsdelivr.net/gh/abhyasapp/content@main').replace(/\/+$/, '');
-      try {
-        const res = await fetch(`${base}/content/${encodeURIComponent(fileId)}.json`, { signal: AbortSignal.timeout(10000) });
-        if (res.ok) { raw = await res.json(); arr = flattenQuestions(raw); }
-      } catch { /* fall through */ }
-    }
-  }
+  // Subjective files come from Storage; objective files from the CDN mirror with
+  // every logged correction overlaid by qid, so what the admin sees is the
+  // question as students will see it, not the lagging CDN copy.
+  const lf = await loadFileForEdit(fileId);
+  const arr = lf ? lf.arr : null;
   if (!arr || !arr.length) return json({ success: false, error: 'Could not read file' });
-  // Show the question as the correction log has it, not as the pipeline last exported it.
-  await overlayQuestions(arr);
   const at = questionIndexFor(arr, index, qid);
   if (!arr[at]) return json({ success: false, error: 'Question not found in file' });
+  // A write without a qid may only target a question that has no stable id of
+  // its own; otherwise the caller must say which question it means.
+  if (!qid && !positionWriteAllowed(arr, at)) return json({ success: false, error: 'This question has a stable id; send its qid.', code: 'qid_required' });
   const q = arr[at];
-  return json({ success: true, index: at, qid: qid || null, total: arr.length, question: { q: q.q || q.question || '', options: q.options || q.opts || [], correct: q.correct ?? q.answer ?? null, explanation: q.explanation || q.exp || q.explain || '' } });
+  const qidNow = qid || primaryQid(q).qid || null;
+  return json({ success: true, index: at, qid: qidNow, rev: questionRev(q), overlay: lf!.overlay, total: arr.length, question: { q: q.q || q.question || '', options: q.options || q.opts || [], correct: q.correct ?? q.answer ?? null, explanation: q.explanation || q.exp || q.explain || '' } });
 }
 
 export async function adminupdatequestion(params: Record<string, unknown>) {
@@ -517,39 +535,28 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
     return json({ success: true, duplicate: true, qid: qid || null });
   }
 
-  // Load the file from Supabase Storage (subjective) or the CONTENT CDN
-  // (objective/Drive-backed). Track whether we can write it back.
-  let raw: any = null;
-  let arr: any[] = [];
-  let writable = false;
-  try {
-    const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
-    if (!error && blob) {
-      raw = JSON.parse(await blob.text());
-      arr = flattenQuestions(raw);
-      writable = true;
-    } else {
-      throw new Error('not in storage');
-    }
-  } catch {
-    if (/^[A-Za-z0-9_-]+$/.test(fileId)) {
-      const base = (Deno.env.get('CONTENT_CDN_BASE') || 'https://cdn.jsdelivr.net/gh/abhyasapp/content@main').replace(/\/+$/, '');
-      try {
-        const res = await fetch(`${base}/content/${encodeURIComponent(fileId)}.json`, { signal: AbortSignal.timeout(10000) });
-        if (res.ok) { raw = await res.json(); arr = flattenQuestions(raw); }
-      } catch { /* fall through */ }
-    }
-  }
-  if (!arr || !arr.length) return json({ success: false, error: 'Could not read file' });
+  // Storage (subjective, writable) or the CDN mirror with corrections overlaid.
+  const lf = await loadFileForEdit(fileId);
+  if (!lf || !lf.arr.length) return json({ success: false, error: 'Could not read file' });
+  const { raw, arr, writable } = lf;
 
   const at = questionIndexFor(arr, index, qid);
   if (!arr[at]) return json({ success: false, error: 'Question not found' });
 
   const currentQ = arr[at].q || arr[at].question || '';
-  // When a qid is present the question was located by id, so position/text
-  // drift does not mean "wrong question" — qid is authoritative. Only enforce
-  // the concurrency guard for legacy (qid-less) reports.
+  // Identity first: without a qid the write is positional, which is only safe
+  // for a question that has no stable id. A question that has one must be named.
+  if (!qid && !positionWriteAllowed(arr, at)) return json({ success: false, error: 'This question has a stable id; send its qid.', code: 'qid_required' });
+  // Concurrency: by qid the guard is the question REVISION (what students see:
+  // text, options, answer, explanation) — `baseRev` from admingetquestion. A
+  // legacy qid-less write keeps the old expectedQ text guard.
+  const curRev = questionRev(arr[at]);
+  const baseRev = String(params.baseRev || '').trim();
+  if (qid && baseRev && baseRev !== curRev) {
+    return json({ success: false, error: 'This question was changed by someone else since you opened it. Reload it.', code: 'rev_conflict', currentRev: curRev });
+  }
   if (!qid && String(currentQ).trim() !== expectedQ) return json({ success: false, error: 'File changed since you opened it. Please reload.' });
+  const resolvedQid = qid || primaryQid(arr[at]).qid;
 
   try {
     // Verbatim before-side for the correction pipeline (source number and
@@ -571,6 +578,12 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
     const invalid = validateCorrection(after, beforeEdit);
     if (invalid) return json({ success: false, error: invalid });
 
+    // The revision this edit produces, computed on a copy BEFORE anything is
+    // written, so the event row can carry base_rev → new_rev.
+    const projected = JSON.parse(JSON.stringify(arr[at]));
+    applyAfter(projected, after);
+    const newRev = questionRev(projected);
+
     // Per-edit event: (dedupe_key, corrected_at) is the pipeline's idempotency
     // key, so a re-edit needs a new correctedAt from the client.
     const event = {
@@ -578,7 +591,7 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
       report_id: String(params.reportId || ''), corrected_at: correctedAt,
       before: JSON.stringify(beforeEdit), after: JSON.stringify(after),
       note: String(params.adminNote || ''), admin_user: admin.username,
-      created_at: new Date().toISOString(),
+      created_at: new Date().toISOString(), base_rev: curRev, new_rev: newRev,
     };
     const ev = await writeCorrectionEvent(event);
     if (ev.error) {
@@ -603,6 +616,7 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
       }
     }
 
+    await registerFileIndex(fileId, arr);   // keep the qid registry (rev, derived position) current
     try {
       await markFileCorrected(fileId);
       await supabase.from('settings').upsert({ key: 'contentVersion', value: String(Date.now()) });
@@ -625,7 +639,7 @@ export async function adminupdatequestion(params: Record<string, unknown>) {
       reportId: String(params.reportId || ''), qid, uid: reportUid,
       admin: admin.username, at: correctedAt, after, close: params.closeReport !== false,
     });
-    return json({ success: true, qid: qid || null, alsoClosed });
+    return json({ success: true, qid: resolvedQid || null, rev: newRev, alsoClosed });
   } catch (e) { return json({ success: false, error: 'Could not save: ' + String(e) }); }
 }
 
@@ -652,6 +666,7 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
   const entries: any[] = [];
   const pending: Pending[] = [];
   const seen = new Set<string>();
+  const targeted = new Set<string>();   // fileId#position already queued in this batch
   const files = new Map<string, { arr: any[]; raw: any; writable: boolean }>();
 
   for (const item of items) {
@@ -684,23 +699,9 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
 
       let file = files.get(fileId);
       if (!file) {
-        let raw: any = null;
-        let writable = false;
-        try {
-          const { data: blob, error } = await supabase.storage.from('subjective-content').download(fileId);
-          if (!error && blob) { raw = JSON.parse(await blob.text()); writable = true; }
-          else throw new Error('not in storage');
-        } catch {
-          if (/^[A-Za-z0-9_-]+$/.test(fileId)) {
-            const base = (Deno.env.get('CONTENT_CDN_BASE') || 'https://cdn.jsdelivr.net/gh/abhyasapp/content@main').replace(/\/+$/, '');
-            try {
-              const res = await fetch(`${base}/content/${encodeURIComponent(fileId)}.json`, { signal: AbortSignal.timeout(10000) });
-              if (res.ok) raw = await res.json();
-            } catch { /* fall through */ }
-          }
-        }
-        if (!raw) throw new Error('File not found');
-        file = { arr: flattenQuestions(raw), raw, writable };
+        const lf = await loadFileForEdit(fileId);
+        if (!lf) throw new Error('File not found');
+        file = { arr: lf.arr, raw: lf.raw, writable: lf.writable };
         files.set(fileId, file);
       }
       const at = questionIndexFor(file.arr, index, qid);
@@ -708,9 +709,25 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
       if (!q) throw new Error('Question not found');
       const currentQ = q.q || q.question || '';
       const expectedQ = String(item.expectedQ || '').trim();
-      // qid is authoritative: when present, the question was located by id, so
-      // position/text drift is not a conflict. Only legacy (qid-less) reports
-      // use the expectedQ concurrency guard.
+      // Two items for one question in a single batch would each compute their
+      // "before" from the same stale copy; make the caller send them separately.
+      const targetKey = fileId + '#' + at;
+      if (targeted.has(targetKey)) { entry.code = 'duplicate_in_batch'; throw new Error('Two corrections in this batch target the same question; send them in separate requests.'); }
+      targeted.add(targetKey);
+      // Identity first: a qid-less item may only be applied by position to a
+      // question with no stable id of its own.
+      if (!qid && !positionWriteAllowed(file.arr, at)) {
+        entry.code = 'qid_required';
+        throw new Error('This question has a stable id; send its qid.');
+      }
+      // By qid the concurrency guard is the question revision (baseRev); a
+      // legacy qid-less item keeps the expectedQ text guard.
+      const curRev = questionRev(q);
+      const baseRev = String(item.baseRev || '').trim();
+      if (qid && baseRev && baseRev !== curRev) {
+        entry.conflict = true; entry.code = 'rev_conflict'; entry.currentRev = curRev;
+        throw new Error('The question changed since you opened it.');
+      }
       if (!qid && expectedQ && String(currentQ).trim() !== expectedQ) {
         entry.conflict = true;
         throw new Error('The question changed since you opened it.');
@@ -738,6 +755,10 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
         setExplanation(q, cleanAfter.explanation);
       };
 
+      const projected = JSON.parse(JSON.stringify(q));
+      applyAfter(projected, cleanAfter);
+      const newRev = questionRev(projected);
+      entry.rev = newRev;
       const editUid = qid ? `q${qid}` : (uid || `${fileId}_${at}`);
       pending.push({
         entry, fileId, dedupeKey, qid, reportId, uid, after: cleanAfter, apply,
@@ -747,7 +768,7 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
           report_id: reportId, corrected_at: correctedAt,
           before: JSON.stringify(before), after: JSON.stringify(cleanAfter),
           note: String(item.adminNote || ''), admin_user: admin.username,
-          created_at: new Date().toISOString(),
+          created_at: new Date().toISOString(), base_rev: curRev, new_rev: newRev,
         },
       });
     } catch (e: any) {
@@ -806,7 +827,7 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
 
   // Mark each affected file once for the student poller, then bump the
   // content version once for the whole batch.
-  for (const fileId of savedFiles) await markFileCorrected(fileId);
+  for (const fileId of savedFiles) { await markFileCorrected(fileId); await registerFileIndex(fileId, files.get(fileId)!.arr); }
   if (savedFiles.size) {
     await supabase.from('settings').upsert({ key: 'contentVersion', value: String(Date.now()) });
   }
@@ -819,7 +840,7 @@ export async function adminapplycorrections(params: Record<string, unknown>) {
 // POST text/plain JSON: {action:"syncCorrectionsSince", key, since, limit}
 // The admin console routes every admin action here (abhyasEndpointFor), so
 // this store - not only the Apps Script sheet - has to answer the pipeline.
-function constantTimeEqual(a: string, b: string): boolean {
+export function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
@@ -843,51 +864,7 @@ export async function clearreports(params: Record<string, unknown>) {
   return json({ success: true, deleted: count ?? null });
 }
 
-// Pipeline audit: expose reports (with qid) to the Neon pipeline so reported
-// questions can be joined against Neon questions for dedupe/correction status.
-// SYNC_KEY auth, like syncCorrectionsSince.
-export async function syncreportssince(params: Record<string, unknown>) {
-  const expected = Deno.env.get('SYNC_KEY') || Deno.env.get('ABHYAS_SYNC_KEY') || '';
-  if (!expected) {
-    return json({ success: false, code: 'not_configured', error: 'SYNC_KEY is not set on the api function.' }, 503);
-  }
-  const key = String(params.key || '');
-  if (!key || !constantTimeEqual(key, expected)) {
-    return json({ success: false, code: 'unauthorized', error: 'ABHYAS_SYNC_KEY does not match SYNC_KEY in the api function environment.' }, 401);
-  }
-
-  const since = Math.max(0, Number(params.since) || 0);
-  const limit = Math.max(1, Math.min(5000, Number(params.limit) || 2000));
-  const rows = await selectAll('question_reports', '*', { orderBy: 'id', max: limit });
-  const out: any[] = [];
-  for (const r of (rows || [])) {
-    const atMs = new Date(String(r.reported_at || r.created_at || '')).getTime();
-    if (since && (!isFinite(atMs) || atMs <= since)) continue;
-    const qid = qidString(r.qid);
-    out.push({
-      id: r.id,
-      uid: r.uid,
-      qid: qid || null,
-      fileId: r.file_id,
-      questionSnapshot: r.question_snapshot,
-      optionsSnapshot: r.options_snapshot,
-      correctIndex: r.correct_index,
-      chosenIndex: r.chosen_index,
-      reason: r.reason,
-      note: r.note,
-      reportedBy: r.reported_by,
-      reportedAt: isFinite(atMs) ? new Date(atMs).toISOString() : (r.reported_at || ''),
-      status: r.status,
-      resolvedAt: r.resolved_at,
-      resolvedBy: r.resolved_by,
-      corrected: !!r.corrected,
-      correctedSnapshot: r.corrected_snapshot,
-      section: r.section,
-      appVersion: r.app_version,
-    });
-  }
-  return json({ success: true, reports: out, count: out.length });
-}
+// syncreportssince / resolvereports / admincorrect live in handlers/pipeline.ts.
 
 export async function synccorrectionssince(params: Record<string, unknown>) {
   const expected = Deno.env.get('SYNC_KEY') || Deno.env.get('ABHYAS_SYNC_KEY') || '';
@@ -1176,21 +1153,15 @@ export async function adminmostmissedquestions(params: Record<string, unknown>) 
   // positional uid, so the same question is not split across two rows after
   // its file is reordered or corrected.
   const tally: Record<string, { n: number; w: number; users: Set<string>; qid: string; uid: string }> = {};
-  for (const row of rows) {
-    const user = String(row.username || '');
-    const parsed = await readProgress(row.data);   // understands gz1: compressed rows
-    const sessions = Array.isArray(parsed?.prog?.sessions) ? parsed.prog.sessions : [];
-    sessions.forEach((s: any) => {
-      (s?.qres || []).forEach((qr: any) => {
-        const entry = qresIdentity(qr);
-        if (!entry) return;
-        const r = tally[entry.id] || (tally[entry.id] = { n: 0, w: 0, users: new Set(), qid: entry.qid, uid: entry.uid });
-        if (!r.qid) r.qid = entry.qid;
-        if (!r.uid) r.uid = entry.uid;
-        r.n++; if (!qr.ok) r.w++;
-        if (user) r.users.add(user);
-      });
-    });
+  const { flat, uidToQid } = await scanProgressQres(rows);
+  for (const { user, qr } of flat) {
+    const entry = qresIdentity(qr, uidToQid);
+    if (!entry) continue;
+    const r = tally[entry.id] || (tally[entry.id] = { n: 0, w: 0, users: new Set(), qid: entry.qid, uid: entry.uid });
+    if (!r.qid) r.qid = entry.qid;
+    if (!r.uid) r.uid = entry.uid;
+    r.n++; if (!qr.ok) r.w++;
+    if (user) r.users.add(user);
   }
 
   const results = Object.keys(tally).map(id => {

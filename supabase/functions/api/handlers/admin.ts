@@ -422,7 +422,7 @@ export async function admindeleteuser(params: Record<string, unknown>) {
   const subjPaths = (subjRows || []).map(r => String(r.pdf_file_id || '')).filter(p => isStoragePath(p));
   const backupPaths = (subjRows || []).map(r => String(r.pdf_original_backup_id || '')).filter(p => isStoragePath(p));
 
-  const tables = ['progress', 'progress_history', 'progress_backups', 'payments', 'push_tokens', 'weekly_attempts', 'weekly_starts', 'subjective_submissions'];
+  const tables = ['progress', 'progress_history', 'progress_backups', 'payments', 'push_tokens', 'weekly_attempts', 'weekly_starts', 'subjective_submissions', 'user_qstate', 'answer_events'];
   for (const t of tables) await supabase.from(t).delete().eq('username', username);
   await supabase.from('question_reports').update({ reported_by: '[deleted user]' }).eq('reported_by', username);
   await supabase.from('logs').update({ target: '[deleted user]' }).eq('target', username);
@@ -477,7 +477,7 @@ export async function admindeleteusersbatch(params: Record<string, unknown>) {
     const subjPaths = (subjRows || []).map(r => String(r.pdf_file_id || '')).filter(p => isStoragePath(p));
     const backupPaths = (subjRows || []).map(r => String(r.pdf_original_backup_id || '')).filter(p => isStoragePath(p));
 
-    const tables = ['progress', 'progress_history', 'progress_backups', 'payments', 'push_tokens', 'weekly_attempts', 'weekly_starts', 'subjective_submissions'];
+    const tables = ['progress', 'progress_history', 'progress_backups', 'payments', 'push_tokens', 'weekly_attempts', 'weekly_starts', 'subjective_submissions', 'user_qstate', 'answer_events'];
     for (const t of tables) {
       const { error: tErr } = await supabase.from(t).delete().in('username', part);
       if (tErr) console.error('[admindeleteusersbatch] delete failed on', t, tErr.message);

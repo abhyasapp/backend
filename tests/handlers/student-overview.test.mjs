@@ -1,4 +1,10 @@
 import assert from 'node:assert/strict';
+
+// The fixtures below are dated November 2026 and the handler flags students who have been inactive
+// for 7+ days, measured with Date.now(). Pin the clock to the day after the fixtures' last activity so
+// this test cannot start failing just because the real date moves on (it did, on 2026-11-18).
+const PINNED_NOW = Date.parse('2026-11-12T12:00:00.000Z');
+Date.now = () => PINNED_NOW;
 import { DB, reset } from './mock-supabase.mjs';
 const A = await import('../../supabase/functions/api/handlers/admin.ts');
 const { tokenHash } = await import('../../supabase/functions/api/_shared/crypto.ts');
