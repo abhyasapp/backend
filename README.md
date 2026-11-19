@@ -41,18 +41,36 @@ owner promotes them. The last owner can never be deleted or demoted.
    (adds `question_reports.qid` and the `correction_events` log).
    then `supabase/migrations/20261115000000_integrity_hardening.sql`
    (lookup/unique indexes, Storage limits and the atomic rate-limit helper).
-   All are idempotent; an existing database only needs the newer ones.
+   then `supabase/migrations/20261117000000_qid_core.sql`
+   (adds `question_index`, `user_qstate`, `answer_events`, `qid_stats` and the
+   per-question fact log).
+   then `supabase/migrations/20261118000000_report_updated_at.sql`
+   (server-stamped `question_reports.updated_at` + touch trigger, the cursor the
+   pipeline reads).
+   All are idempotent; an existing database only needs the newer ones
+   (`supabase db push` applies just the pending pair).
 2. **Edge Function**
    ```bash
    supabase secrets set DEFAULT_OWNER_PASSWORD=<private>   # required; no default
    supabase functions deploy api
    ```
-3. **Apps Script** — paste `code.gs`, `sync.gs`, `supabase-bridge.gs`, `report.gs`,
-   `private-files.gs`, `setup.gs`; add Script Properties `SYNC_KEY`
-   (run `generateSyncKey()`) and `SUPABASE_SERVICE_ROLE_KEY`; run
-   `testSupabaseBridge()`; **Deploy → Manage deployments → new version**.
+   Optional, for correction push-back from `admincorrect`/`resolvereports`:
+   `GITHUB_TOKEN`, `GITHUB_CORRECTIONS_WORKFLOW` (defaults to the corrections
+   workflow file) and `GITHUB_CORRECTIONS_REF` (defaults to `main`).
+3. **Apps Script** — the project holds `code.gs`, `sync.gs`, `supabase-bridge.gs`,
+   `report.gs`, `qid-core.gs`, `qid.gs`, `admin-reports.gs`, `private-files.gs`,
+   `setup.gs` (v1.70 adds `qid-core.gs`, `qid.gs`, `admin-reports.gs` and edits
+   `code.gs`, `report.gs`, `sync.gs`, `supabase-bridge.gs`). Script Properties:
+   `SYNC_KEY` (run `generateSyncKey()`), `SUPABASE_URL`,
+   `SUPABASE_SERVICE_ROLE_KEY`; run `testSupabaseBridge()`; **Deploy → Manage
+   deployments → new version** (keep the same `/exec` URL). `?action=ping`
+   answers `version: "1.47"`.
 4. **GitHub secrets**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GAS_URL`, `GAS_SYNC_KEY`.
 5. **Sync** — run the workflow manually as a **dry run**, read the table, then run it for real.
+6. **Question registry** (optional, seeds `question_index`):
+   ```bash
+   node scripts/push-question-index.mjs --content <dir> --supabase <url> --gas <url>
+   ```
 
 ## Smoke test
 
@@ -72,7 +90,7 @@ npm run verify    # syntax of every .ts/.gs/.js + schema/sync/GAS/owner-admin te
 - every .ts/.gs/.js source parses (no deploy of a broken file),
 - every table/column the Edge Function TypeScript touches exists in the
   migrations and cannot drift, tested against a real Postgres engine (pglite),
-- all 20 tables have RLS enabled and zero policies (only the service role reads),
+- all 24 tables have RLS enabled and zero policies (only the service role reads),
 - every Apps Script sheet header maps onto a real Postgres column through
   `scripts/sync.js` renames, so the six-hourly sync cannot write unknown columns,
 - a student cannot start or submit the same weekly test twice,
