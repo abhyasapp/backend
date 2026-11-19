@@ -333,7 +333,13 @@ function adminReportsCorrect_(p) {
     return { success: false, error: "too many corrections dispatched; try again later" };
   }
   const repo = adminReportsProp_("GITHUB_REPO") || ADMIN_REPORTS_CFG_.githubRepo;
-  const workflow = adminReportsProp_("GITHUB_WORKFLOW") || ADMIN_REPORTS_CFG_.workflow;
+  /* CORRECTIONS_WORKFLOW, not GITHUB_WORKFLOW: the latter also names the workflow that is
+     currently running, so a CI runner (or a copied secret) silently pointed the dispatch at
+     an unrelated workflow. A .yml value of the old name is still accepted. */
+  const legacyWorkflow = adminReportsProp_("GITHUB_WORKFLOW");
+  const workflow = adminReportsProp_("GITHUB_CORRECTIONS_WORKFLOW")
+    || (/\.ya?ml$/i.test(legacyWorkflow || "") ? legacyWorkflow : "")
+    || ADMIN_REPORTS_CFG_.workflow;
   const resp = UrlFetchApp.fetch("https://api.github.com/repos/" + repo + "/actions/workflows/" + workflow + "/dispatches", {
     method: "post", contentType: "application/json", muteHttpExceptions: true,
     headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },

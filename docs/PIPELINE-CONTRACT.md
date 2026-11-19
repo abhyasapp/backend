@@ -14,7 +14,7 @@ with the same body. An unknown action says `Unknown action` (so "not deployed ye
 | Sync key (pipeline) | `ABHYAS_SYNC_KEY` or `SYNC_KEY` | `ABHYAS_SYNC_KEY` or `SYNC_KEY` |
 | Admin key (**separate**) | `ABHYAS_ADMIN_KEY` | `ABHYAS_ADMIN_KEY` |
 | Supabase (Apps Script → Supabase mirror) | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` or `SUPABASE_SERVICE_KEY` | — |
-| GitHub dispatch | `GITHUB_TOKEN` (fine-grained, this repo, Actions read+write); optional `GITHUB_REPO`, `GITHUB_WORKFLOW`, `GITHUB_REF` | same |
+| GitHub dispatch | `GITHUB_TOKEN` (fine-grained, this repo, Actions read+write); optional `GITHUB_REPO`, `GITHUB_CORRECTIONS_WORKFLOW`, `GITHUB_REF` | same |
 
 Keys are compared in constant time over the longer string (neither content nor length leaks), an
 unset key never matches, and `admincorrect` refuses to run if the admin key equals the sync key.

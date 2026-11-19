@@ -40,6 +40,20 @@ export function safeEq(a: unknown, b: unknown): boolean {
 const syncKey = () => Deno.env.get('ABHYAS_SYNC_KEY') || Deno.env.get('SYNC_KEY') || '';
 const adminKey = () => Deno.env.get('ABHYAS_ADMIN_KEY') || '';
 
+/**
+ * The workflow admincorrect dispatches. `GITHUB_WORKFLOW` is a GitHub Actions
+ * built-in naming the workflow that is *currently running* ("CI" on a runner),
+ * so it is the wrong name to configure and is only honoured when it actually
+ * looks like a workflow file. Prefer GITHUB_CORRECTIONS_WORKFLOW.
+ */
+export function correctionsWorkflow(): string {
+  const explicit = Deno.env.get('GITHUB_CORRECTIONS_WORKFLOW') || '';
+  if (explicit) return explicit;
+  const legacy = Deno.env.get('GITHUB_WORKFLOW') || '';
+  if (/\.ya?ml$/i.test(legacy)) return legacy;
+  return 'apply_admin_corrections.yml';
+}
+
 function isoOrRaw(v: unknown): string {
   const s = String(v ?? '');
   if (!s) return '';
@@ -237,7 +251,7 @@ export async function admincorrect(params: Record<string, unknown>) {
   await rlHit('admincorrect', CORRECT_RATE_WINDOW_MS);
 
   const repo = Deno.env.get('GITHUB_REPO') || 'abhyasapp/DRIVETONEONTODRIVE';
-  const workflow = Deno.env.get('GITHUB_WORKFLOW') || 'apply_admin_corrections.yml';
+  const workflow = correctionsWorkflow();
   let status = 0;
   try {
     const resp = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`, {
