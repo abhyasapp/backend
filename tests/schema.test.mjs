@@ -82,7 +82,9 @@ test('a student cannot start or submit the same weekly test twice', async () => 
 });
 
 test('deleted_records tombstone table behaves (used by sync.js)', async () => {
-  await db.exec(`insert into deleted_records (table_name,pk) values ('users','ghost')`);
+  // An explicit old stamp: a row written "now" is not strictly older than now(),
+  // so a same-tick prune legitimately keeps it and the test would flap.
+  await db.exec(`insert into deleted_records (table_name,pk,deleted_at) values ('users','ghost', now() - interval '1 day')`);
   await assert.rejects(db.exec(`insert into deleted_records (table_name,pk) values ('users','ghost')`),
     'same (table,pk) cannot be tombstoned twice');
   await db.exec(`select prune_deleted_records(keep_days => 0)`);
