@@ -41,6 +41,18 @@ const syncKey = () => Deno.env.get('ABHYAS_SYNC_KEY') || Deno.env.get('SYNC_KEY'
 const adminKey = () => Deno.env.get('ABHYAS_ADMIN_KEY') || '';
 
 /**
+ * The branch the dispatched workflow runs on. `GITHUB_REF` is a runner built-in
+ * holding "refs/heads/main", which the dispatch API rejects (it wants "main"),
+ * so it is normalised and a dedicated name is preferred.
+ */
+export function dispatchRef(): string {
+  const explicit = Deno.env.get('GITHUB_CORRECTIONS_REF') || '';
+  if (explicit) return explicit;
+  const legacy = Deno.env.get('GITHUB_REF') || '';
+  return legacy.replace(/^refs\/heads\//, '') || 'main';
+}
+
+/**
  * The workflow admincorrect dispatches. `GITHUB_WORKFLOW` is a GitHub Actions
  * built-in naming the workflow that is *currently running* ("CI" on a runner),
  * so it is the wrong name to configure and is only honoured when it actually
@@ -231,7 +243,7 @@ export function dispatchBody(items: Correction[], publish: unknown): { error: st
   // Publishing republishes the question JSON to Drive, which students see. Only an explicit
   // true / "true" does that; an omitted or garbled flag never publishes.
   const doPublish = publish === true || publish === 'true';
-  return { body: { ref: Deno.env.get('GITHUB_REF') || 'main', inputs: { corrections_json: text, publish: doPublish ? 'true' : 'false' } } };
+  return { body: { ref: dispatchRef(), inputs: { corrections_json: text, publish: doPublish ? 'true' : 'false' } } };
 }
 
 export async function admincorrect(params: Record<string, unknown>) {

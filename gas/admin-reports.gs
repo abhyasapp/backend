@@ -310,7 +310,10 @@ function adminReportsDispatchBody_(items, publish) {
   const doPublish = publish === true || publish === "true";
   return {
     body: {
-      ref: adminReportsProp_("GITHUB_REF") || ADMIN_REPORTS_CFG_.ref,
+      /* "refs/heads/main" (the GITHUB_REF style) is not a branch name: normalise it. */
+      ref: adminReportsProp_("GITHUB_CORRECTIONS_REF")
+        || String(adminReportsProp_("GITHUB_REF") || "").replace(/^refs\/heads\//, "")
+        || ADMIN_REPORTS_CFG_.ref,
       inputs: { corrections_json: json, publish: doPublish ? "true" : "false" }
     }
   };
