@@ -122,6 +122,18 @@ console.log('GAS sync harness: all assertions passed');
   assert.equal(indexFor(arrQ, 2, ''), 2, 'must use the position when no id was supplied');
   assert.equal(indexFor(arrQ, 0, 'no-such-id'), -1, 'an unknown id must not fall back to the position');
 
+  // The published files carry the stable id on `public_qn` (the pipeline's
+  // LCCCSSSFQQQQ) next to an unrelated internal number on `id`. A lookup list
+  // without public_qn answers "That question is no longer in the file" for a
+  // question that is present, which is what the report editor showed.
+  var arrPqn = [
+    { id: 44794, public_qn: '70035.910001', q: 'clamp' },
+    { id: 44581, public_qn: '70035.910002', q: 'cladding' }
+  ];
+  assert.equal(indexFor(arrPqn, 0, '70035.910002'), 1, 'must resolve by public_qn, ignoring the internal id');
+  assert.equal(indexFor(arrPqn, 1, '70035.910001'), 0, 'a stale position must not override the qid');
+  assert.equal(indexFor(arrPqn, 0, 'G0022.810001'), -1, 'an id absent from the file must still be -1');
+
   console.log('GAS correction-sync contract: all assertions passed');
 })();
 

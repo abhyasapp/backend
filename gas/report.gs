@@ -141,7 +141,11 @@ function normalizeQReportQid_(v) {
    position - only when no id was supplied at all. Mirrors questionIndexFor()
    in the Supabase Edge Function so both backends resolve a question the same
    way. Returns -1 when an id was supplied but matches nothing. */
-const QREPORT_QID_FIELDS = ["id", "qid", "qnid", "publicId", "publicQid", "code"];
+/* Same fields and order as qid-core.gs (QID_FIELDS_) and _shared/qid.ts: the
+   published files carry the stable id on public_qn and an unrelated internal
+   number on id, so a list without public_qn can never locate a reported
+   question ("no longer in the file" for a question that is right there). */
+const QREPORT_QID_FIELDS = ["public_qn", "publicQn", "qnid", "qid", "id", "publicId", "publicQid", "code"];
 function qidMatchesGas_(candidate, wanted) {
   if (!wanted) return false;
   const raw = String(candidate == null ? "" : candidate).trim();
@@ -153,6 +157,9 @@ function qidMatchesGas_(candidate, wanted) {
 }
 function questionIndexForId_(arr, index, qid) {
   if (!qid) return index;
+  /* One traversal order for both backends. qidIndexFor_ lives in qid-core.gs and
+     is resolved lazily because Apps Script loads files in no fixed order. */
+  if (typeof qidIndexFor_ === "function") return qidIndexFor_(arr, index, qid);
   for (let f = 0; f < QREPORT_QID_FIELDS.length; f++) {
     const field = QREPORT_QID_FIELDS[f];
     for (let i = 0; i < arr.length; i++) {
