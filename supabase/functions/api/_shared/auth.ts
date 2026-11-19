@@ -45,7 +45,12 @@ export async function authUser(params: Record<string, unknown>, opts: { withHash
   const errResp = { success: false, error: 'Session expired. Please log in again.', sessionInvalid: true };
   if (!username) return { ok: false as const, error: { success: false, error: 'Username required.' } };
 
-  const { data } = await supabase.from('users').select(opts.withHash ? '*' : USER_COLS_NO_HASH).eq('username', username).limit(1);
+  // supabase-js parses the select list at TYPE level, so a runtime string makes it
+  // give up and every `user.<column>` read below fails to compile. The list is a
+  // module constant pinned by tests/schema.test.mjs, so the builder is widened here
+  // instead of at each call site.
+  const q: any = supabase.from('users');
+  const { data } = await q.select(opts.withHash ? '*' : USER_COLS_NO_HASH).eq('username', username).limit(1);
   const user = data && data[0] ? data[0] : null;
   if (!user) return { ok: false as const, error: errResp };
   // A rejected account may not keep using a session that was issued before it was rejected.
